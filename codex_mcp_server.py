@@ -79,35 +79,46 @@ async def _send_context_message(task: Task, level: str, message: str):
     if not task.context:
         return
 
-    handler = getattr(task.context, level, None)
-    if not callable(handler):
-        handler = task.context.info
-
     try:
-        await asyncio.shield(handler(message))
+        # Use session's send_log_message for reliable notifications from background tasks
+        if hasattr(task.context, 'session') and task.context.session:
+            await asyncio.shield(
+                task.context.session.send_log_message(level=level, data=message)
+            )
+        else:
+            # Fallback to context methods
+            handler = getattr(task.context, level, None)
+            if not callable(handler):
+                handler = task.context.info
+            await asyncio.shield(handler(message))
     except Exception as e:
         print(f"[ERROR] Failed to send {level} notification: {e}", file=sys.stderr, flush=True)
+        # Also print to stderr so it's always visible
+        print(f"[CODEX-ASYNC] {message}", file=sys.stderr, flush=True)
 
 
 async def _emit_task_notification(task: Task):
-    if not task.context:
-        return
-
     prefix = "[codex-async]"
     label = _task_display_name(task)
 
     if task.status == "completed":
         message = f"{prefix} {label} finished (task {task.task_id}). Run get_task_result to view the Codex output."
         level = "info"
-        await _send_context_message(task, level, message)
     elif task.status == "failed":
         summary = _summarize_error(task.error)
         message = f"{prefix} {label} failed (task {task.task_id}). {summary}"
         level = "error"
-        await _send_context_message(task, level, message)
     elif task.status == "cancelled":
         message = f"{prefix} {label} was cancelled (task {task.task_id})."
         level = "warning"
+    else:
+        return
+
+    # Always print to stderr for visibility
+    print(f"\n{message}\n", file=sys.stderr, flush=True)
+
+    # Also try MCP notification if context is available
+    if task.context:
         await _send_context_message(task, level, message)
 
 
