@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-MCP Server for Codex CLI Integration
-Allows Claude Code to send plans to Codex CLI for review
+MCP Server for Claude CLI Integration
+Allows Claude Code to send plans to the Claude CLI for review
 """
 
 import asyncio
 import json
 import os
 import re
+import shlex
 import sys
 import uuid
 from collections import deque
@@ -20,14 +21,61 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.session import ServerSession
 
 
-# Configuration
-# Set to False to require approval for Codex operations (more secure)
-# Set to True for automated execution without approval (less secure)
-BYPASS_APPROVALS = os.environ.get("CODEX_BYPASS_APPROVALS", "false").lower() == "true"
+# Configuration helpers
+def _get_env(primary: str, fallback: Optional[str] = None, default: str = "") -> str:
+    """
+    Return the value of an environment variable, preferring the Claude-prefixed
+    key while still honoring legacy Codex names. Empty strings are treated as
+    intentional values and therefore bypass the fallback.
+    """
+    value = os.environ.get(primary)
+    if value is not None:
+        return value
+    if fallback:
+        fallback_value = os.environ.get(fallback)
+        if fallback_value is not None:
+            return fallback_value
+    return default
 
-# Set to False to show full Codex output including prompt templates
-# Set to True to clean output and show only Codex's actual response (default)
-CLEAN_OUTPUT = os.environ.get("CODEX_CLEAN_OUTPUT", "true").lower() == "true"
+
+def _get_env_bool(primary: str, fallback: Optional[str], default: str) -> bool:
+    return _get_env(primary, fallback, default).lower() == "true"
+
+
+def _get_env_args(primary: str, fallback: Optional[str], default: str) -> list[str]:
+    raw_value = _get_env(primary, fallback, default)
+    return shlex.split(raw_value)
+
+
+# Configuration
+# Set to False to require approval for Claude operations (more secure)
+# Set to True for automated execution without approval (less secure)
+BYPASS_APPROVALS = _get_env_bool(
+    "CLAUDE_BYPASS_APPROVALS", "CODEX_BYPASS_APPROVALS", "false"
+)
+
+# Set to False to show full Claude output including prompt templates
+# Set to True to clean output and show only Claude's actual response (default)
+CLEAN_OUTPUT = _get_env_bool("CLAUDE_CLEAN_OUTPUT", "CODEX_CLEAN_OUTPUT", "true")
+
+# Base command configuration
+CLAUDE_BINARY = _get_env("CLAUDE_CLI_BINARY", "CODEX_CLI_BINARY", "claude")
+CLAUDE_AUTO_SUBCOMMAND = _get_env("CLAUDE_AUTO_SUBCOMMAND", "CODEX_AUTO_SUBCOMMAND", "auto")
+CLAUDE_AUTO_ARGS = _get_env_args("CLAUDE_AUTO_ARGS", "CODEX_AUTO_ARGS", "")
+CLAUDE_AUTO_STANDARD_ARGS = _get_env_args(
+    "CLAUDE_AUTO_STANDARD_ARGS",
+    "CODEX_AUTO_STANDARD_ARGS",
+    "",
+)
+CLAUDE_AUTO_BYPASS_ARGS = _get_env_args(
+    "CLAUDE_AUTO_BYPASS_ARGS",
+    "CODEX_AUTO_BYPASS_ARGS",
+    "--dangerously-skip-permissions",
+)
+CLAUDE_AUTO_STDIN_ARG = _get_env("CLAUDE_AUTO_STDIN_ARG", "CODEX_AUTO_STDIN_ARG", "-")
+NOTIFICATION_PREVIEW_CHARS = int(
+    _get_env("CLAUDE_NOTIFICATION_PREVIEW_CHARS", "CODEX_NOTIFICATION_PREVIEW_CHARS", "600")
+)
 
 # Review Memory - stores past findings to avoid repeating the same issues
 REVIEW_MEMORY_FILE = Path("data/review_memory.jsonl")
@@ -37,7 +85,7 @@ REVIEW_MEMORY_MAX_ENTRIES = 100  # Keep only the most recent 100 reviews to prev
 # Task Management
 @dataclass
 class Task:
-    """Represents a background Codex task"""
+    """Represents a background Claude task"""
     task_id: str
     status: str  # pending, running, completed, failed, cancelled
     command: str
@@ -57,12 +105,12 @@ tasks: dict[str, Task] = {}
 
 def _task_display_name(task: Task) -> str:
     if task.command == "review":
-        return "Codex review"
+        return "Claude review"
     if isinstance(task.args, dict):
         cmd = task.args.get("command")
         if cmd:
-            return f"Codex command '{cmd}'"
-    return "Codex task"
+            return f"Claude command '{cmd}'"
+    return "Claude task"
 
 
 def _summarize_error(message: Optional[str], limit: int = 200) -> str:
@@ -72,6 +120,29 @@ def _summarize_error(message: Optional[str], limit: int = 200) -> str:
     if len(cleaned) > limit:
         return cleaned[:limit - 3] + "..."
     return cleaned
+
+
+def _truncate_output(output: str, limit: int) -> str:
+    """
+    Return a truncated version of output suitable for inline notifications.
+    """
+    if not output:
+        return ""
+    sanitized = output.strip()
+    if len(sanitized) <= limit:
+        return sanitized
+    return sanitized[:limit - 3] + "..."
+
+
+def _sanitize_notification_text(text: str) -> str:
+    """
+    Best-effort scrubbing of sensitive paths or tokens before including text
+    in inline notifications.
+    """
+    if not text:
+        return ""
+    sanitized = text.replace(str(Path.home()), "~")
+    return sanitized
 
 
 async def _send_context_message(task: Task, level: str, message: str):
@@ -92,16 +163,25 @@ async def _emit_task_notification(task: Task):
     if not task.context:
         return
 
-    prefix = "[codex-async]"
+    prefix = "[claude-async]"
     label = _task_display_name(task)
 
     if task.status == "completed":
-        message = f"{prefix} {label} finished (task {task.task_id}). Run get_task_result to view the Codex output."
+        message = f"{prefix} {label} finished (task {task.task_id})."
+        preview = _truncate_output(_sanitize_notification_text(task.result or ""), NOTIFICATION_PREVIEW_CHARS)
+        if preview:
+            message += f"\n\nPreview:\n{preview}"
+        message += "\n\nRun get_task_result to view the full Claude output."
         level = "info"
         await _send_context_message(task, level, message)
     elif task.status == "failed":
         summary = _summarize_error(task.error)
         message = f"{prefix} {label} failed (task {task.task_id}). {summary}"
+        preview_source = task.error or task.result or ""
+        preview = _truncate_output(_sanitize_notification_text(preview_source), NOTIFICATION_PREVIEW_CHARS)
+        if preview:
+            message += f"\n\nError preview:\n{preview}"
+        message += "\n\nRun get_task_result to inspect the full error output."
         level = "error"
         await _send_context_message(task, level, message)
     elif task.status == "cancelled":
@@ -131,16 +211,16 @@ async def cleanup_old_tasks():
 
 
 # Initialize FastMCP server
-mcp = FastMCP("codex-cli-server")
+mcp = FastMCP("claude-cli-server")
 
 
-def clean_codex_output(raw_output: str, original_prompt: str = "") -> str:
+def clean_claude_output(raw_output: str, original_prompt: str = "") -> str:
     """
-    Clean Codex CLI output by removing echoed prompt templates.
+    Clean Claude CLI output by removing echoed prompt templates.
 
     Args:
-        raw_output: Raw output from Codex CLI
-        original_prompt: The prompt we sent to Codex (optional)
+        raw_output: Raw output from Claude CLI
+        original_prompt: The prompt we sent to Claude (optional)
 
     Returns:
         Cleaned output with only the actual response
@@ -164,6 +244,35 @@ def clean_codex_output(raw_output: str, original_prompt: str = "") -> str:
     return cleaned
 
 
+def _build_claude_env(base_cwd: Optional[str] = None) -> dict[str, str]:
+    """
+    Construct the environment for Claude CLI invocations. Unless
+    `CLAUDE_CONFIG_DIR` is explicitly provided, the CLI will fall back to its
+    default configuration directory (e.g., `~/.claude`).
+    """
+    env = os.environ.copy()
+    config_dir = env.get("CLAUDE_CONFIG_DIR")
+
+    if config_dir:
+        try:
+            config_path = Path(config_dir).expanduser()
+            if not config_path.is_absolute():
+                resolved_base = Path(base_cwd) if base_cwd else Path.cwd()
+                config_path = resolved_base / config_path
+            config_path = config_path.resolve()
+            config_path.mkdir(parents=True, exist_ok=True)
+            env["CLAUDE_CONFIG_DIR"] = str(config_path)
+        except Exception as exc:
+            print(
+                f"[WARNING] Unable to prepare CLAUDE_CONFIG_DIR '{config_dir}': {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            env.pop("CLAUDE_CONFIG_DIR", None)
+
+    return env
+
+
 def _append_review_memory(review_type: str, files: list[str], result: str, working_directory: str = None):
     """
     Append a review finding to the review memory JSONL file.
@@ -172,7 +281,7 @@ def _append_review_memory(review_type: str, files: list[str], result: str, worki
     Args:
         review_type: Type of review (plan, code, architecture, security)
         files: List of files reviewed
-        result: The Codex review output
+        result: The Claude review output
         working_directory: Working directory of the review
     """
     try:
@@ -256,10 +365,10 @@ def _read_review_memory(file_filter: str = None, review_type: str = None, limit:
         return []
 
 
-async def _run_codex_review(task_id: str, plan: str, context: str, review_type: str,
-                            working_directory: str = None, files: list[str] = None):
+async def _run_claude_review(task_id: str, plan: str, context: str, review_type: str,
+                             working_directory: str = None, files: list[str] = None):
     """
-    Background coroutine that runs Codex review and updates task status
+    Background coroutine that runs Claude review and updates task status
     """
     task = tasks[task_id]
 
@@ -288,22 +397,29 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
 {f"Context: {context}" if context else ""}"""
 
         # Build command (without prompt to avoid ARG_MAX)
-        cmd = ["codex", "exec", "--skip-git-repo-check"]
+        cmd = [CLAUDE_BINARY]
+        if CLAUDE_AUTO_SUBCOMMAND:
+            cmd.append(CLAUDE_AUTO_SUBCOMMAND)
 
-        if BYPASS_APPROVALS:
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
-            cmd.append("--full-auto")
+        extra_args = CLAUDE_AUTO_BYPASS_ARGS if BYPASS_APPROVALS else CLAUDE_AUTO_STANDARD_ARGS
+        if extra_args:
+            cmd.extend(extra_args)
 
-        cmd.append("-")  # Read from stdin
+        if CLAUDE_AUTO_ARGS:
+            cmd.extend(CLAUDE_AUTO_ARGS)
 
-        # Execute Codex CLI with prompt via stdin
+        if CLAUDE_AUTO_STDIN_ARG:
+            cmd.append(CLAUDE_AUTO_STDIN_ARG)
+
+        # Execute Claude CLI with prompt via stdin
+        env = _build_claude_env(working_directory)
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=working_directory if working_directory else None
+            cwd=working_directory if working_directory else None,
+            env=env
         )
 
         task.process = process
@@ -317,7 +433,7 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
             process.kill()
             await process.wait()
             task.status = "failed"
-            task.error = "Codex CLI review timed out after 300 seconds"
+            task.error = "Claude CLI review timed out after 300 seconds"
             task.completion_time = datetime.now()
             await _emit_task_notification(task)
             return
@@ -326,9 +442,9 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
         stderr_text = stderr.decode('utf-8') if stderr else ""
 
         if process.returncode == 0:
-            cleaned_output = clean_codex_output(stdout_text, review_prompt)
+            cleaned_output = clean_claude_output(stdout_text, review_prompt)
             task.status = "completed"
-            task.result = f"Codex CLI Review Results:\n\n{cleaned_output}"
+            task.result = f"Claude CLI Review Results:\n\n{cleaned_output}"
             task.completion_time = datetime.now()
 
             # Log to review memory
@@ -345,7 +461,7 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
 
             combined_error = "\n\n".join(error_output) if error_output else "No output"
             task.status = "failed"
-            task.error = f"Codex CLI returned an error (exit code {process.returncode}):\n\n{combined_error}"
+            task.error = f"Claude CLI returned an error (exit code {process.returncode}):\n\n{combined_error}"
             task.completion_time = datetime.now()
             await _emit_task_notification(task)
 
@@ -363,8 +479,8 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
         raise
 
     except FileNotFoundError as e:
-        if e.filename == "codex":
-            task.error = "Error: 'codex' command not found. Please ensure Codex CLI is installed and in your PATH."
+        if e.filename == CLAUDE_BINARY:
+            task.error = f"Error: '{CLAUDE_BINARY}' command not found. Please ensure Claude CLI is installed and in your PATH."
         else:
             task.error = f"Error: Path not found or inaccessible: {e.filename or working_directory or 'unknown'}"
         task.status = "failed"
@@ -373,7 +489,7 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
 
     except Exception as e:
         task.status = "failed"
-        task.error = f"Error executing Codex CLI: {str(e)}"
+        task.error = f"Error executing Claude CLI: {str(e)}"
         task.completion_time = datetime.now()
         await _emit_task_notification(task)
 
@@ -388,13 +504,13 @@ async def start_review(
     files: list[str] = None
 ) -> str:
     """
-    Start a background Codex review and return task ID immediately.
+    Start a background Claude review and return task ID immediately.
 
     Args:
         plan: The plan, code, or changes to review
         context: Additional context about the task or goal (optional)
         review_type: Type of review to perform (plan, code, architecture, security)
-        working_directory: Working directory for Codex to use (optional)
+        working_directory: Working directory for Claude CLI to use (optional)
         files: Specific files to review (optional)
     """
     # Validate inputs
@@ -424,16 +540,16 @@ async def start_review(
     tasks[task_id] = task
 
     # Launch background task
-    task.async_task = asyncio.create_task(_run_codex_review(
+    task.async_task = asyncio.create_task(_run_claude_review(
         task_id, plan, context, review_type, working_directory, files
     ))
 
-    return f"Codex review started. Task ID: {task_id}\n\nUse get_task_status or get_task_result to check progress."
+    return f"Claude review started. Task ID: {task_id}\n\nUse get_task_status or get_task_result to check progress."
 
 
-async def _run_codex_command(task_id: str, command: str, args: list[str]):
+async def _run_claude_command(task_id: str, command: str, args: list[str]):
     """
-    Background coroutine that runs Codex command and updates task status
+    Background coroutine that runs Claude CLI command and updates task status
     """
     task = tasks[task_id]
 
@@ -449,7 +565,10 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
 
         if args and not BYPASS_APPROVALS:
             # Reject attempts to inject bypass flags when approvals must remain enforced
-            blocked_flag_names = {"--dangerously-bypass-approvals-and-sandbox"}
+            blocked_flag_names = {
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-skip-permissions",
+            }
             sanitized_args: list[str] = []
             rejected_args: list[str] = []
 
@@ -464,7 +583,7 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
                 task.status = "failed"
                 task.error = (
                     "Security restriction: the following flags are not permitted when "
-                    "CODEX_BYPASS_APPROVALS is disabled: " + ", ".join(rejected_args)
+                    "CLAUDE_BYPASS_APPROVALS is disabled: " + ", ".join(rejected_args)
                 )
                 task.completion_time = datetime.now()
                 await _emit_task_notification(task)
@@ -474,33 +593,41 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
 
         # Build command
         stdin_input = None
-        # Check if command looks like a Codex subcommand (single word, no spaces)
+        # Check if command looks like a Claude subcommand (single word, no spaces)
         # If it has spaces or looks like natural language, treat as a prompt
         if command and not ' ' in command and command.isascii() and command.strip() == command:
-            # Likely a subcommand - pass through to codex
-            full_command = ["codex", command] + args
+            # Likely a subcommand - pass through to Claude CLI
+            full_command = [CLAUDE_BINARY, command] + args
         else:
-            # Treat as a prompt for exec subcommand (use stdin to avoid ARG_MAX)
+            # Treat as a prompt for the auto workflow (use stdin to avoid ARG_MAX)
             is_prompt = True
             prompt_text = command
             stdin_input = command.encode('utf-8')
 
-            full_command = ["codex", "exec", "--skip-git-repo-check"]
+            full_command = [CLAUDE_BINARY]
+            if CLAUDE_AUTO_SUBCOMMAND:
+                full_command.append(CLAUDE_AUTO_SUBCOMMAND)
 
-            if BYPASS_APPROVALS:
-                full_command.append("--dangerously-bypass-approvals-and-sandbox")
-            else:
-                full_command.append("--full-auto")
+            extra_args = CLAUDE_AUTO_BYPASS_ARGS if BYPASS_APPROVALS else CLAUDE_AUTO_STANDARD_ARGS
+            if extra_args:
+                full_command.extend(extra_args)
+
+            if CLAUDE_AUTO_ARGS:
+                full_command.extend(CLAUDE_AUTO_ARGS)
+
+            if CLAUDE_AUTO_STDIN_ARG:
+                full_command.append(CLAUDE_AUTO_STDIN_ARG)
 
             full_command.extend(args)
-            full_command.append("-")  # Read from stdin
 
-        # Execute Codex CLI
+        # Execute Claude CLI
+        env = _build_claude_env()
         process = await asyncio.create_subprocess_exec(
             *full_command,
             stdin=asyncio.subprocess.PIPE if stdin_input else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            env=env
         )
 
         task.process = process
@@ -514,7 +641,7 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
             process.kill()
             await process.wait()
             task.status = "failed"
-            task.error = "Codex CLI command timed out after 300 seconds"
+            task.error = "Claude CLI command timed out after 300 seconds"
             task.completion_time = datetime.now()
             await _emit_task_notification(task)
             return
@@ -525,10 +652,10 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
         if process.returncode == 0:
             # Clean the output if this was a prompt
             if is_prompt:
-                cleaned_output = clean_codex_output(stdout_text, prompt_text)
-                task.result = f"Codex CLI Output:\n\n{cleaned_output}"
+                cleaned_output = clean_claude_output(stdout_text, prompt_text)
+                task.result = f"Claude CLI Output:\n\n{cleaned_output}"
             else:
-                task.result = f"Codex CLI Output:\n\n{stdout_text}"
+                task.result = f"Claude CLI Output:\n\n{stdout_text}"
 
             task.status = "completed"
             task.completion_time = datetime.now()
@@ -543,7 +670,7 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
 
             combined_error = "\n\n".join(error_output) if error_output else "No output"
             task.status = "failed"
-            task.error = f"Codex CLI Error (exit code {process.returncode}):\n\n{combined_error}"
+            task.error = f"Claude CLI Error (exit code {process.returncode}):\n\n{combined_error}"
             task.completion_time = datetime.now()
             await _emit_task_notification(task)
 
@@ -561,8 +688,8 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
         raise
 
     except FileNotFoundError as e:
-        if e.filename == "codex":
-            task.error = "Error: 'codex' command not found. Please ensure Codex CLI is installed and in your PATH."
+        if e.filename == CLAUDE_BINARY:
+            task.error = f"Error: '{CLAUDE_BINARY}' command not found. Please ensure Claude CLI is installed and in your PATH."
         else:
             task.error = f"Error: Path not found or inaccessible: {e.filename or 'unknown'}"
         task.status = "failed"
@@ -571,22 +698,22 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
 
     except Exception as e:
         task.status = "failed"
-        task.error = f"Error executing Codex CLI: {str(e)}"
+        task.error = f"Error executing Claude CLI: {str(e)}"
         task.completion_time = datetime.now()
         await _emit_task_notification(task)
 
 
 @mcp.tool()
-async def start_codex_command(
+async def start_claude_command(
     command: str,
     ctx: Context[ServerSession, None],
     args: list[str] = None
 ) -> str:
     """
-    Start a background Codex command and return task ID immediately.
+    Start a background Claude CLI command and return task ID immediately.
 
     Args:
-        command: The Codex CLI command to execute
+        command: The Claude CLI command to execute
         args: Arguments to pass to the command
     """
     # Validate inputs
@@ -610,11 +737,11 @@ async def start_codex_command(
     tasks[task_id] = task
 
     # Launch background task
-    task.async_task = asyncio.create_task(_run_codex_command(
+    task.async_task = asyncio.create_task(_run_claude_command(
         task_id, command, args or []
     ))
 
-    return f"Codex command started. Task ID: {task_id}\n\nUse get_task_status or get_task_result to check progress."
+    return f"Claude command started. Task ID: {task_id}\n\nUse get_task_status or get_task_result to check progress."
 
 
 @mcp.tool()
@@ -623,7 +750,7 @@ async def get_task_status(task_id: str) -> str:
     Get the status of a background task.
 
     Args:
-        task_id: The task ID returned by start_review or start_codex_command
+        task_id: The task ID returned by start_review or start_claude_command
     """
     if not task_id or task_id not in tasks:
         return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
@@ -661,7 +788,7 @@ async def get_task_result(task_id: str) -> str:
     Get the result of a completed background task.
 
     Args:
-        task_id: The task ID returned by start_review or start_codex_command
+        task_id: The task ID returned by start_review or start_claude_command
     """
     if not task_id or task_id not in tasks:
         return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
@@ -690,7 +817,7 @@ async def wait_for_task(task_id: str, timeout: int = 300) -> str:
     Blocks until the task finishes or timeout is reached.
 
     Args:
-        task_id: The task ID returned by start_review or start_codex_command
+        task_id: The task ID returned by start_review or start_claude_command
         timeout: Maximum seconds to wait (default: 300)
     """
     if not task_id or task_id not in tasks:
@@ -786,7 +913,7 @@ async def query_review_memory(
     limit: int = 10
 ) -> str:
     """
-    Query past Codex review findings from review memory.
+    Query past Claude review findings from review memory.
 
     Args:
         file_filter: Optional substring to filter by file path (e.g., "server.py")
