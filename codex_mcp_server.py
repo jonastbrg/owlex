@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -314,10 +315,23 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
                 timeout=300
             )
         except asyncio.TimeoutError:
+            # Capture any partial output before killing
+            try:
+                partial_stdout = await process.stdout.read() if process.stdout else b""
+                partial_stderr = await process.stderr.read() if process.stderr else b""
+                partial_output = []
+                if partial_stdout:
+                    partial_output.append(f"Partial stdout:\n{partial_stdout.decode('utf-8', errors='replace')}")
+                if partial_stderr:
+                    partial_output.append(f"Partial stderr:\n{partial_stderr.decode('utf-8', errors='replace')}")
+                output_info = "\n\n".join(partial_output) if partial_output else "No partial output available"
+            except Exception as e:
+                output_info = f"Could not capture partial output: {e}"
+
             process.kill()
             await process.wait()
             task.status = "failed"
-            task.error = "Codex CLI review timed out after 300 seconds"
+            task.error = f"Codex CLI review timed out after 300 seconds\n\n{output_info}"
             task.completion_time = datetime.now()
             await _emit_task_notification(task)
             return
@@ -331,8 +345,12 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
             task.result = f"Codex CLI Review Results:\n\n{cleaned_output}"
             task.completion_time = datetime.now()
 
-            # Log to review memory
-            _append_review_memory(review_type, files, cleaned_output, working_directory)
+            # Log to review memory (wrapped to avoid failing successful reviews)
+            try:
+                _append_review_memory(review_type, files, cleaned_output, working_directory)
+            except Exception as e:
+                # Don't fail the review if memory logging fails
+                print(f"[WARNING] Failed to append to review memory: {e}", file=sys.stderr, flush=True)
 
             await _emit_task_notification(task)
 
@@ -357,8 +375,8 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
             try:
                 task.process.kill()
                 await task.process.wait()
-            except:
-                pass
+            except Exception as e:
+                print(f"[WARNING] Error during process cleanup on cancellation: {e}", file=sys.stderr, flush=True)
         await _emit_task_notification(task)
         raise
 
@@ -375,6 +393,8 @@ async def _run_codex_review(task_id: str, plan: str, context: str, review_type: 
         task.status = "failed"
         task.error = f"Error executing Codex CLI: {str(e)}"
         task.completion_time = datetime.now()
+        # Log full traceback to stderr for debugging
+        print(f"[ERROR] Exception in Codex execution:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
         await _emit_task_notification(task)
 
 
@@ -555,8 +575,8 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
             try:
                 task.process.kill()
                 await task.process.wait()
-            except:
-                pass
+            except Exception as e:
+                print(f"[WARNING] Error during process cleanup on cancellation: {e}", file=sys.stderr, flush=True)
         await _emit_task_notification(task)
         raise
 
@@ -573,6 +593,8 @@ async def _run_codex_command(task_id: str, command: str, args: list[str]):
         task.status = "failed"
         task.error = f"Error executing Codex CLI: {str(e)}"
         task.completion_time = datetime.now()
+        # Log full traceback to stderr for debugging
+        print(f"[ERROR] Exception in Codex execution:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
         await _emit_task_notification(task)
 
 
