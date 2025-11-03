@@ -91,6 +91,9 @@ async def _send_context_message(task: Task, level: str, message: str):
             if not callable(handler):
                 handler = task.context.info
             await asyncio.shield(handler(message))
+    except asyncio.CancelledError:
+        # Client disconnected/interrupted - silently fail, don't crash server
+        print(f"[DEBUG] Notification cancelled (client disconnected): {message[:100]}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to send {level} notification: {e}", file=sys.stderr, flush=True)
         # Also print to stderr so it's always visible
@@ -658,34 +661,41 @@ async def get_task_status(task_id: str) -> str:
     Args:
         task_id: The task ID returned by start_review or start_codex_command
     """
-    if not task_id or task_id not in tasks:
-        return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
+    try:
+        if not task_id or task_id not in tasks:
+            return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
 
-    task = tasks[task_id]
+        task = tasks[task_id]
 
-    status_info = f"""Task ID: {task_id}
+        status_info = f"""Task ID: {task_id}
 Status: {task.status}
 Command: {task.command}
 Started: {task.start_time.strftime('%Y-%m-%d %H:%M:%S')}"""
 
-    if task.completion_time:
-        duration = (task.completion_time - task.start_time).total_seconds()
-        status_info += f"\nCompleted: {task.completion_time.strftime('%Y-%m-%d %H:%M:%S')}"
-        status_info += f"\nDuration: {duration:.1f} seconds"
+        if task.completion_time:
+            duration = (task.completion_time - task.start_time).total_seconds()
+            status_info += f"\nCompleted: {task.completion_time.strftime('%Y-%m-%d %H:%M:%S')}"
+            status_info += f"\nDuration: {duration:.1f} seconds"
 
-    if task.status == "pending":
-        status_info += "\n\nTask is queued and will start soon."
-    elif task.status == "running":
-        elapsed = (datetime.now() - task.start_time).total_seconds()
-        status_info += f"\n\nTask is running (elapsed: {elapsed:.1f} seconds)."
-    elif task.status == "completed":
-        status_info += "\n\nTask completed successfully. Use get_task_result to retrieve the output."
-    elif task.status == "failed":
-        status_info += f"\n\nTask failed: {task.error}"
-    elif task.status == "cancelled":
-        status_info += "\n\nTask was cancelled."
+        if task.status == "pending":
+            status_info += "\n\nTask is queued and will start soon."
+        elif task.status == "running":
+            elapsed = (datetime.now() - task.start_time).total_seconds()
+            status_info += f"\n\nTask is running (elapsed: {elapsed:.1f}s seconds)."
+        elif task.status == "completed":
+            status_info += "\n\nTask completed successfully. Use get_task_result to retrieve the output."
+        elif task.status == "failed":
+            status_info += f"\n\nTask failed: {task.error}"
+        elif task.status == "cancelled":
+            status_info += "\n\nTask was cancelled."
 
-    return status_info
+        return status_info
+    except asyncio.CancelledError:
+        # Client interrupted - must re-raise to properly handle cancellation
+        raise
+    except Exception as e:
+        # Catch any unexpected exceptions to prevent MCP connection breakage
+        return f"Error in get_task_status: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
 
 @mcp.tool()
@@ -696,24 +706,31 @@ async def get_task_result(task_id: str) -> str:
     Args:
         task_id: The task ID returned by start_review or start_codex_command
     """
-    if not task_id or task_id not in tasks:
-        return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
+    try:
+        if not task_id or task_id not in tasks:
+            return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
 
-    task = tasks[task_id]
+        task = tasks[task_id]
 
-    if task.status == "pending":
-        return f"Task {task_id} is still pending. Use get_task_status to check its status."
-    elif task.status == "running":
-        elapsed = (datetime.now() - task.start_time).total_seconds()
-        return f"Task {task_id} is still running (elapsed: {elapsed:.1f} seconds). Use get_task_status to check its status."
-    elif task.status == "completed":
-        return task.result or "Task completed but no output was captured."
-    elif task.status == "failed":
-        return f"Task {task_id} failed:\n\n{task.error}"
-    elif task.status == "cancelled":
-        return f"Task {task_id} was cancelled."
-    else:
-        return f"Task {task_id} has unknown status: {task.status}"
+        if task.status == "pending":
+            return f"Task {task_id} is still pending. Use get_task_status to check its status."
+        elif task.status == "running":
+            elapsed = (datetime.now() - task.start_time).total_seconds()
+            return f"Task {task_id} is still running (elapsed: {elapsed:.1f} seconds). Use get_task_status to check its status."
+        elif task.status == "completed":
+            return task.result or "Task completed but no output was captured."
+        elif task.status == "failed":
+            return f"Task {task_id} failed:\n\n{task.error}"
+        elif task.status == "cancelled":
+            return f"Task {task_id} was cancelled."
+        else:
+            return f"Task {task_id} has unknown status: {task.status}"
+    except asyncio.CancelledError:
+        # Client interrupted - must re-raise to properly handle cancellation
+        raise
+    except Exception as e:
+        # Catch any unexpected exceptions to prevent MCP connection breakage
+        return f"Error in get_task_result: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
 
 @mcp.tool()
@@ -726,43 +743,56 @@ async def wait_for_task(task_id: str, timeout: int = 300) -> str:
         task_id: The task ID returned by start_review or start_codex_command
         timeout: Maximum seconds to wait (default: 300)
     """
-    if not task_id or task_id not in tasks:
-        return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
+    try:
+        if not task_id or task_id not in tasks:
+            return f"Error: Task '{task_id}' not found. It may have expired (tasks are kept for 5 minutes after completion)."
 
-    task = tasks[task_id]
+        task = tasks[task_id]
 
-    # If task is already done, return immediately
-    if task.status in ["completed", "failed", "cancelled"]:
+        # If task is already done, return immediately
+        if task.status in ["completed", "failed", "cancelled"]:
+            if task.status == "completed":
+                return f"Task completed!\n\n{task.result or 'No output was captured.'}"
+            elif task.status == "failed":
+                return f"Task failed:\n\n{task.error}"
+            else:
+                return f"Task was cancelled."
+
+        # Wait for the asyncio task to complete
+        # Use shield to prevent timeout from cancelling the background task
+        if task.async_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(task.async_task), timeout=timeout)
+            except asyncio.TimeoutError:
+                # Task keeps running in background despite timeout
+                elapsed = (datetime.now() - task.start_time).total_seconds()
+                return f"Task is still running after {timeout}s timeout (total elapsed: {elapsed:.1f}s). Use get_task_result to check later."
+            except asyncio.CancelledError:
+                # Client interrupted the wait (e.g., pressed ESC) - task continues in background
+                # Must re-raise to properly handle cancellation
+                raise
+            except Exception as e:
+                # Task itself failed - check if we can get error details
+                if task.status == "failed":
+                    return f"Task failed:\n\n{task.error}"
+                return f"Task encountered an error: {str(e)}"
+
+        # Return the result based on final status
         if task.status == "completed":
             return f"Task completed!\n\n{task.result or 'No output was captured.'}"
         elif task.status == "failed":
-            return f"Task failed:\n\n{task.error}"
+            return f"Task failed!\n\n{task.error}"
+        elif task.status == "cancelled":
+            return f"Task was cancelled."
         else:
-            return f"Task was cancelled."
-
-    # Wait for the asyncio task to complete
-    # Use shield to prevent timeout from cancelling the background task
-    if task.async_task:
-        try:
-            await asyncio.wait_for(asyncio.shield(task.async_task), timeout=timeout)
-        except asyncio.TimeoutError:
-            # Task keeps running in background despite timeout
-            elapsed = (datetime.now() - task.start_time).total_seconds()
-            return f"Task is still running after {timeout}s timeout (total elapsed: {elapsed:.1f}s). Use get_task_result to check later."
-        except asyncio.CancelledError:
-            return f"Task was cancelled."
-        except Exception as e:
-            return f"Task failed with exception: {str(e)}"
-
-    # Return the result based on final status
-    if task.status == "completed":
-        return f"Task completed!\n\n{task.result or 'No output was captured.'}"
-    elif task.status == "failed":
-        return f"Task failed:\n\n{task.error}"
-    elif task.status == "cancelled":
-        return f"Task was cancelled."
-    else:
-        return f"Task ended with unexpected status: {task.status}"
+            return f"Task ended with unexpected status: {task.status}"
+    except asyncio.CancelledError:
+        # Client interrupted the MCP call itself (ESC key)
+        # Must re-raise to properly handle cancellation
+        raise
+    except Exception as e:
+        # Catch any unexpected exceptions to prevent MCP connection breakage
+        return f"Error in wait_for_task: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
 
 @mcp.tool()
