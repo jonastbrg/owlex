@@ -50,8 +50,8 @@ def mock_config():
 class TestCouncilRound1:
     """Tests for round 1 parallel execution."""
 
-    async def test_runs_both_agents_in_parallel(self, mock_engine, mock_config):
-        """Should run Codex and Gemini in parallel."""
+    async def test_runs_all_agents_in_parallel(self, mock_engine, mock_config):
+        """Should run Aider, Codex, and Gemini in parallel."""
         call_order = []
 
         async def mock_run_agent(task, runner, mode="exec", **kwargs):
@@ -72,10 +72,12 @@ class TestCouncilRound1:
             timeout=10,
         )
 
-        # Both should start before either ends (parallel execution)
-        assert "codex_start" in call_order[:2]
-        assert "gemini_start" in call_order[:2]
+        # All three should start before any ends (parallel execution)
+        assert "aider_start" in call_order[:3]
+        assert "codex_start" in call_order[:3]
+        assert "gemini_start" in call_order[:3]
         assert response.round_1 is not None
+        assert response.round_1.aider.status == "completed"
         assert response.round_1.codex.status == "completed"
         assert response.round_1.gemini.status == "completed"
 

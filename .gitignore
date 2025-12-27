@@ -34,3 +34,4 @@ uv.lock
 
 # Runtime data
 data/
+.aider*

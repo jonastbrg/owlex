@@ -5,6 +5,7 @@ Tests for agent CLI command construction.
 from unittest.mock import patch
 
 import pytest
+from owlex.agents.aider import AiderRunner
 from owlex.agents.codex import CodexRunner
 from owlex.agents.gemini import GeminiRunner
 
@@ -305,8 +306,155 @@ class TestGeminiRunner:
             assert "--dangerous" in cmd.command
 
 
+class TestAiderRunner:
+    """Tests for Aider CLI command construction."""
+
+    @pytest.fixture
+    def runner(self):
+        return AiderRunner()
+
+    def test_exec_basic_command(self, runner):
+        """Should build basic exec command."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Fix the bug")
+
+            assert cmd.command[0] == "aider"
+            assert "--message" in cmd.command
+            assert "Fix the bug" in cmd.command
+            assert "--dry-run" in cmd.command  # Read-only by default
+            assert "--yes-always" in cmd.command
+            assert cmd.prompt == ""  # Prompt is in command
+            assert cmd.output_prefix == "Aider Output"
+            assert cmd.stream is True
+
+    def test_exec_with_working_directory(self, runner):
+        """Should set cwd for working directory."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(
+                prompt="Hello",
+                working_directory="/path/to/dir"
+            )
+
+            assert cmd.cwd == "/path/to/dir"
+
+    def test_exec_with_model(self, runner):
+        """Should add model flag when configured."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = "claude-3-sonnet"
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "--model" in cmd.command
+            idx = cmd.command.index("--model")
+            assert cmd.command[idx + 1] == "claude-3-sonnet"
+
+    def test_exec_with_no_git(self, runner):
+        """Should add --no-git flag when configured."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = True
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "--no-git" in cmd.command
+
+    def test_exec_without_yes_always(self, runner):
+        """Should not include --yes-always when disabled."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = False
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "--yes-always" not in cmd.command
+
+    def test_exec_without_dry_run(self, runner):
+        """Should not include --dry-run when disabled."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = False
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "--dry-run" not in cmd.command
+
+    def test_exec_with_auto_commits(self, runner):
+        """Should not add --no-auto-commits when auto_commits is True."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = True
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "--no-auto-commits" not in cmd.command
+
+    def test_resume_delegates_to_exec(self, runner):
+        """Resume should delegate to exec (Aider uses history file for context)."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_resume_command(
+                session_ref="ignored",
+                prompt="Continue working"
+            )
+
+            # Resume just calls exec since Aider uses history files
+            assert "--message" in cmd.command
+            assert "Continue working" in cmd.command
+
+    def test_not_found_hint(self, runner):
+        """Should include helpful installation hint."""
+        with patch("owlex.agents.aider.config") as mock_config:
+            mock_config.aider.model = None
+            mock_config.aider.dry_run = True
+            mock_config.aider.yes_always = True
+            mock_config.aider.no_git = False
+            mock_config.aider.auto_commits = False
+
+            cmd = runner.build_exec_command(prompt="Hello")
+
+            assert "aider-chat" in cmd.not_found_hint
+
+
 class TestAgentInterface:
     """Tests for AgentRunner interface compliance."""
+
+    def test_aider_has_name(self):
+        """Aider runner should have name property."""
+        runner = AiderRunner()
+        assert runner.name == "aider"
 
     def test_codex_has_name(self):
         """Codex runner should have name property."""
@@ -317,6 +465,12 @@ class TestAgentInterface:
         """Gemini runner should have name property."""
         runner = GeminiRunner()
         assert runner.name == "gemini"
+
+    def test_aider_has_output_cleaner(self):
+        """Aider runner should provide output cleaner."""
+        runner = AiderRunner()
+        cleaner = runner.get_output_cleaner()
+        assert callable(cleaner)
 
     def test_codex_has_output_cleaner(self):
         """Codex runner should provide output cleaner."""
