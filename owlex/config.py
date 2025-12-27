@@ -24,10 +24,29 @@ class GeminiConfig:
 
 
 @dataclass(frozen=True)
+class AiderConfig:
+    """Configuration for Aider CLI integration."""
+    model: str | None = None  # Use aider's default if not specified
+    dry_run: bool = True      # Read-only mode - don't modify files
+    yes_always: bool = True   # Auto-accept changes in non-interactive mode
+    no_git: bool = False      # Disable git operations
+    auto_commits: bool = False  # Disable auto-commits (let user control git)
+    clean_output: bool = True
+
+
+@dataclass(frozen=True)
+class CouncilConfig:
+    """Configuration for council orchestration."""
+    exclude_agents: frozenset[str] = frozenset()  # Agents to exclude from council
+
+
+@dataclass(frozen=True)
 class OwlexConfig:
     """Main configuration container."""
     codex: CodexConfig
     gemini: GeminiConfig
+    aider: AiderConfig
+    council: CouncilConfig
     default_timeout: int = 300
 
     def print_warnings(self):
@@ -56,6 +75,24 @@ def load_config() -> OwlexConfig:
         clean_output=os.environ.get("GEMINI_CLEAN_OUTPUT", "true").lower() == "true",
     )
 
+    aider = AiderConfig(
+        model=os.environ.get("AIDER_MODEL") or None,
+        dry_run=os.environ.get("AIDER_DRY_RUN", "true").lower() == "true",
+        yes_always=os.environ.get("AIDER_YES_ALWAYS", "true").lower() == "true",
+        no_git=os.environ.get("AIDER_NO_GIT", "false").lower() == "true",
+        auto_commits=os.environ.get("AIDER_AUTO_COMMITS", "false").lower() == "true",
+        clean_output=os.environ.get("AIDER_CLEAN_OUTPUT", "true").lower() == "true",
+    )
+
+    # Parse council exclude agents (comma-separated list)
+    exclude_raw = os.environ.get("COUNCIL_EXCLUDE_AGENTS", "")
+    exclude_agents = frozenset(
+        agent.strip().lower()
+        for agent in exclude_raw.split(",")
+        if agent.strip()
+    )
+    council = CouncilConfig(exclude_agents=exclude_agents)
+
     try:
         timeout = int(os.environ.get("OWLEX_DEFAULT_TIMEOUT", "300"))
         if timeout <= 0:
@@ -68,6 +105,8 @@ def load_config() -> OwlexConfig:
     return OwlexConfig(
         codex=codex,
         gemini=gemini,
+        aider=aider,
+        council=council,
         default_timeout=timeout,
     )
 

@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import config
-from .engine import engine, build_agent_response, codex_runner, gemini_runner
+from .engine import engine, build_agent_response, aider_runner, codex_runner, gemini_runner
 from .prompts import build_deliberation_prompt
 from .models import (
     Agent,
@@ -27,10 +27,10 @@ def _log(msg: str):
 
 class Council:
     """
-    Orchestrates multi-agent deliberation between Codex and Gemini.
+    Orchestrates multi-agent deliberation between Aider, Codex, and Gemini.
 
     The council process:
-    1. Round 1: Both agents answer the question in parallel
+    1. Round 1: All agents answer the question in parallel
     2. Round 2 (optional): Agents see each other's answers and revise/critique
     """
 
@@ -83,7 +83,11 @@ class Council:
         # === Round 1: Parallel initial queries ===
         if claude_opinion and claude_opinion.strip():
             self.log(f"Claude's opinion received ({len(claude_opinion)} chars)")
-        self.log("Round 1: querying Codex and Gemini...")
+
+        # Determine which agents to run
+        excluded = config.council.exclude_agents
+        agents = [a for a in ["aider", "codex", "gemini"] if a not in excluded]
+        self.log(f"Round 1: querying {', '.join(a.title() for a in agents)}...")
 
         round_1 = await self._run_round_1(prompt, working_directory, timeout)
 
@@ -129,61 +133,96 @@ class Council:
     ) -> CouncilRound:
         """Run the first round of parallel queries."""
         round1_start = datetime.now()
+        excluded = config.council.exclude_agents
 
-        codex_task = self._engine.create_task(
-            command=f"council_{Agent.CODEX.value}",
-            args={"prompt": prompt, "working_directory": working_directory},
-            context=self.context,
-        )
-        gemini_task = self._engine.create_task(
-            command=f"council_{Agent.GEMINI.value}",
-            args={"prompt": prompt, "working_directory": working_directory},
-            context=self.context,
-        )
+        tasks = {}
+        async_tasks = []
 
-        async def run_codex():
-            await self._engine.run_agent(
-                codex_task, codex_runner, mode="exec",
-                prompt=prompt, working_directory=working_directory, enable_search=config.codex.enable_search
+        # Create tasks for non-excluded agents
+        if "aider" not in excluded:
+            aider_task = self._engine.create_task(
+                command=f"council_{Agent.AIDER.value}",
+                args={"prompt": prompt, "working_directory": working_directory},
+                context=self.context,
             )
-            elapsed = (datetime.now() - round1_start).total_seconds()
-            status = "completed" if codex_task.status == "completed" else "failed"
-            self.log(f"Codex {status} ({elapsed:.1f}s)")
+            tasks["aider"] = aider_task
 
-        async def run_gemini():
-            await self._engine.run_agent(
-                gemini_task, gemini_runner, mode="exec",
-                prompt=prompt, working_directory=working_directory
+            async def run_aider():
+                await self._engine.run_agent(
+                    aider_task, aider_runner, mode="exec",
+                    prompt=prompt, working_directory=working_directory
+                )
+                elapsed = (datetime.now() - round1_start).total_seconds()
+                status = "completed" if aider_task.status == "completed" else "failed"
+                self.log(f"Aider {status} ({elapsed:.1f}s)")
+
+            aider_task.async_task = asyncio.create_task(run_aider())
+            async_tasks.append(aider_task.async_task)
+
+        if "codex" not in excluded:
+            codex_task = self._engine.create_task(
+                command=f"council_{Agent.CODEX.value}",
+                args={"prompt": prompt, "working_directory": working_directory},
+                context=self.context,
             )
-            elapsed = (datetime.now() - round1_start).total_seconds()
-            status = "completed" if gemini_task.status == "completed" else "failed"
-            self.log(f"Gemini {status} ({elapsed:.1f}s)")
+            tasks["codex"] = codex_task
 
-        codex_task.async_task = asyncio.create_task(run_codex())
-        gemini_task.async_task = asyncio.create_task(run_gemini())
+            async def run_codex():
+                await self._engine.run_agent(
+                    codex_task, codex_runner, mode="exec",
+                    prompt=prompt, working_directory=working_directory, enable_search=config.codex.enable_search
+                )
+                elapsed = (datetime.now() - round1_start).total_seconds()
+                status = "completed" if codex_task.status == "completed" else "failed"
+                self.log(f"Codex {status} ({elapsed:.1f}s)")
 
-        # Wait for both tasks with timeout
-        done, pending = await asyncio.wait(
-            [codex_task.async_task, gemini_task.async_task],
-            timeout=timeout,
-            return_when=asyncio.ALL_COMPLETED
-        )
+            codex_task.async_task = asyncio.create_task(run_codex())
+            async_tasks.append(codex_task.async_task)
 
-        # Kill subprocesses for any tasks that timed out
-        for task in [codex_task, gemini_task]:
-            if task.async_task in pending:
-                self.log(f"{task.command} timed out")
-                await self._engine.kill_task_subprocess(task)
-                task.status = "failed"
-                task.error = f"Timed out after {timeout} seconds"
-                task.completion_time = datetime.now()
+        if "gemini" not in excluded:
+            gemini_task = self._engine.create_task(
+                command=f"council_{Agent.GEMINI.value}",
+                args={"prompt": prompt, "working_directory": working_directory},
+                context=self.context,
+            )
+            tasks["gemini"] = gemini_task
+
+            async def run_gemini():
+                await self._engine.run_agent(
+                    gemini_task, gemini_runner, mode="exec",
+                    prompt=prompt, working_directory=working_directory
+                )
+                elapsed = (datetime.now() - round1_start).total_seconds()
+                status = "completed" if gemini_task.status == "completed" else "failed"
+                self.log(f"Gemini {status} ({elapsed:.1f}s)")
+
+            gemini_task.async_task = asyncio.create_task(run_gemini())
+            async_tasks.append(gemini_task.async_task)
+
+        # Wait for all tasks with timeout
+        if async_tasks:
+            done, pending = await asyncio.wait(
+                async_tasks,
+                timeout=timeout,
+                return_when=asyncio.ALL_COMPLETED
+            )
+
+            # Kill subprocesses for any tasks that timed out
+            for task in tasks.values():
+                if task.async_task in pending:
+                    self.log(f"{task.command} timed out")
+                    await self._engine.kill_task_subprocess(task)
+                    task.status = "failed"
+                    task.error = f"Timed out after {timeout} seconds"
+                    task.completion_time = datetime.now()
 
         round1_elapsed = (datetime.now() - round1_start).total_seconds()
         self.log(f"Round 1 complete ({round1_elapsed:.1f}s)")
 
         return CouncilRound(
-            codex=build_agent_response(codex_task, Agent.CODEX),
-            gemini=build_agent_response(gemini_task, Agent.GEMINI),
+            aider=build_agent_response(tasks["aider"], Agent.AIDER) if "aider" in tasks else None,
+            codex=build_agent_response(tasks["codex"], Agent.CODEX) if "codex" in tasks else None,
+            gemini=build_agent_response(tasks["gemini"], Agent.GEMINI) if "gemini" in tasks else None,
         )
 
     async def _run_round_2(
@@ -197,13 +236,16 @@ class Council:
     ) -> CouncilRound:
         """Run the second round of deliberation."""
         self.log("Round 2: deliberation phase...")
+        excluded = config.council.exclude_agents
 
-        codex_content = round_1.codex.content or round_1.codex.error or "(no response)"
-        gemini_content = round_1.gemini.content or round_1.gemini.error or "(no response)"
+        aider_content = (round_1.aider.content or round_1.aider.error or "(no response)") if round_1.aider else None
+        codex_content = (round_1.codex.content or round_1.codex.error or "(no response)") if round_1.codex else None
+        gemini_content = (round_1.gemini.content or round_1.gemini.error or "(no response)") if round_1.gemini else None
         claude_content = claude_opinion.strip() if claude_opinion else None
 
         deliberation_prompt = build_deliberation_prompt(
             original_prompt=prompt,
+            aider_answer=aider_content,
             codex_answer=codex_content,
             gemini_answer=gemini_content,
             claude_answer=claude_content,
@@ -211,57 +253,88 @@ class Council:
         )
 
         round2_start = datetime.now()
+        tasks = {}
+        async_tasks = []
 
-        codex_delib_task = self._engine.create_task(
-            command=f"council_{Agent.CODEX.value}_delib",
-            args={"prompt": deliberation_prompt, "working_directory": working_directory},
-            context=self.context,
-        )
-        gemini_delib_task = self._engine.create_task(
-            command=f"council_{Agent.GEMINI.value}_delib",
-            args={"prompt": deliberation_prompt, "working_directory": working_directory},
-            context=self.context,
-        )
-
-        async def run_codex_delib():
-            await self._engine.run_agent(
-                codex_delib_task, codex_runner, mode="exec",
-                prompt=deliberation_prompt, working_directory=working_directory, enable_search=config.codex.enable_search
+        if "aider" not in excluded:
+            aider_delib_task = self._engine.create_task(
+                command=f"council_{Agent.AIDER.value}_delib",
+                args={"prompt": deliberation_prompt, "working_directory": working_directory},
+                context=self.context,
             )
-            elapsed = (datetime.now() - round2_start).total_seconds()
-            self.log(f"Codex revised ({elapsed:.1f}s)")
+            tasks["aider"] = aider_delib_task
 
-        async def run_gemini_delib():
-            await self._engine.run_agent(
-                gemini_delib_task, gemini_runner, mode="exec",
-                prompt=deliberation_prompt, working_directory=working_directory
+            async def run_aider_delib():
+                await self._engine.run_agent(
+                    aider_delib_task, aider_runner, mode="exec",
+                    prompt=deliberation_prompt, working_directory=working_directory
+                )
+                elapsed = (datetime.now() - round2_start).total_seconds()
+                self.log(f"Aider revised ({elapsed:.1f}s)")
+
+            aider_delib_task.async_task = asyncio.create_task(run_aider_delib())
+            async_tasks.append(aider_delib_task.async_task)
+
+        if "codex" not in excluded:
+            codex_delib_task = self._engine.create_task(
+                command=f"council_{Agent.CODEX.value}_delib",
+                args={"prompt": deliberation_prompt, "working_directory": working_directory},
+                context=self.context,
             )
-            elapsed = (datetime.now() - round2_start).total_seconds()
-            self.log(f"Gemini revised ({elapsed:.1f}s)")
+            tasks["codex"] = codex_delib_task
 
-        codex_delib_task.async_task = asyncio.create_task(run_codex_delib())
-        gemini_delib_task.async_task = asyncio.create_task(run_gemini_delib())
+            async def run_codex_delib():
+                await self._engine.run_agent(
+                    codex_delib_task, codex_runner, mode="exec",
+                    prompt=deliberation_prompt, working_directory=working_directory, enable_search=config.codex.enable_search
+                )
+                elapsed = (datetime.now() - round2_start).total_seconds()
+                self.log(f"Codex revised ({elapsed:.1f}s)")
 
-        # Wait for both tasks with timeout
-        done, pending = await asyncio.wait(
-            [codex_delib_task.async_task, gemini_delib_task.async_task],
-            timeout=timeout,
-            return_when=asyncio.ALL_COMPLETED
-        )
+            codex_delib_task.async_task = asyncio.create_task(run_codex_delib())
+            async_tasks.append(codex_delib_task.async_task)
 
-        # Kill subprocesses for any tasks that timed out
-        for task in [codex_delib_task, gemini_delib_task]:
-            if task.async_task in pending:
-                self.log(f"{task.command} timed out")
-                await self._engine.kill_task_subprocess(task)
-                task.status = "failed"
-                task.error = f"Timed out after {timeout} seconds"
-                task.completion_time = datetime.now()
+        if "gemini" not in excluded:
+            gemini_delib_task = self._engine.create_task(
+                command=f"council_{Agent.GEMINI.value}_delib",
+                args={"prompt": deliberation_prompt, "working_directory": working_directory},
+                context=self.context,
+            )
+            tasks["gemini"] = gemini_delib_task
+
+            async def run_gemini_delib():
+                await self._engine.run_agent(
+                    gemini_delib_task, gemini_runner, mode="exec",
+                    prompt=deliberation_prompt, working_directory=working_directory
+                )
+                elapsed = (datetime.now() - round2_start).total_seconds()
+                self.log(f"Gemini revised ({elapsed:.1f}s)")
+
+            gemini_delib_task.async_task = asyncio.create_task(run_gemini_delib())
+            async_tasks.append(gemini_delib_task.async_task)
+
+        # Wait for all tasks with timeout
+        if async_tasks:
+            done, pending = await asyncio.wait(
+                async_tasks,
+                timeout=timeout,
+                return_when=asyncio.ALL_COMPLETED
+            )
+
+            # Kill subprocesses for any tasks that timed out
+            for task in tasks.values():
+                if task.async_task in pending:
+                    self.log(f"{task.command} timed out")
+                    await self._engine.kill_task_subprocess(task)
+                    task.status = "failed"
+                    task.error = f"Timed out after {timeout} seconds"
+                    task.completion_time = datetime.now()
 
         round2_elapsed = (datetime.now() - round2_start).total_seconds()
         self.log(f"Round 2 complete ({round2_elapsed:.1f}s)")
 
         return CouncilRound(
-            codex=build_agent_response(codex_delib_task, Agent.CODEX),
-            gemini=build_agent_response(gemini_delib_task, Agent.GEMINI),
+            aider=build_agent_response(tasks["aider"], Agent.AIDER) if "aider" in tasks else None,
+            codex=build_agent_response(tasks["codex"], Agent.CODEX) if "codex" in tasks else None,
+            gemini=build_agent_response(tasks["gemini"], Agent.GEMINI) if "gemini" in tasks else None,
         )

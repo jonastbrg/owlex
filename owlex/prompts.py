@@ -30,8 +30,9 @@ DELIBERATION_INSTRUCTION_CRITIQUE = (
 
 def build_deliberation_prompt(
     original_prompt: str,
-    codex_answer: str,
-    gemini_answer: str,
+    codex_answer: str | None = None,
+    gemini_answer: str | None = None,
+    aider_answer: str | None = None,
     claude_answer: str | None = None,
     critique: bool = False,
 ) -> str:
@@ -40,8 +41,9 @@ def build_deliberation_prompt(
 
     Args:
         original_prompt: The original question asked
-        codex_answer: Codex's round 1 answer
-        gemini_answer: Gemini's round 1 answer
+        codex_answer: Codex's round 1 answer (optional if excluded)
+        gemini_answer: Gemini's round 1 answer (optional if excluded)
+        aider_answer: Aider's round 1 answer (optional if excluded)
         claude_answer: Optional Claude opinion to include
         critique: If True, use critique mode prompts
 
@@ -65,15 +67,15 @@ def build_deliberation_prompt(
     if claude_answer:
         parts.extend(["", "CLAUDE'S ANSWER:", claude_answer])
 
-    parts.extend([
-        "",
-        "CODEX'S ANSWER:",
-        codex_answer,
-        "",
-        "GEMINI'S ANSWER:",
-        gemini_answer,
-        "",
-        instruction,
-    ])
+    if aider_answer:
+        parts.extend(["", "AIDER'S ANSWER (DeepSeek):", aider_answer])
+
+    if codex_answer:
+        parts.extend(["", "CODEX'S ANSWER:", codex_answer])
+
+    if gemini_answer:
+        parts.extend(["", "GEMINI'S ANSWER:", gemini_answer])
+
+    parts.extend(["", instruction])
 
     return "\n".join(parts)
