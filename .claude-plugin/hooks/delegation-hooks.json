@@ -1,0 +1,58 @@
+{
+  "$schema": "https://claude.ai/schemas/hooks.json",
+  "description": "Auto-delegation hooks for Owlex multi-agent workflows",
+  "hooks": {
+    "examples": [
+      {
+        "name": "Large codebase review",
+        "trigger": "User asks to review/analyze a large codebase or many files",
+        "suggestion": "Consider using owlex:gemini-delegate for 1M+ token context"
+      },
+      {
+        "name": "Architecture decision",
+        "trigger": "User asks about architecture, trade-offs, or 'should we'",
+        "suggestion": "Consider using owlex:council-delegate for multiple perspectives"
+      },
+      {
+        "name": "Code review",
+        "trigger": "User asks for code review of specific files or PR",
+        "suggestion": "Consider using owlex:codex-delegate for focused analysis"
+      },
+      {
+        "name": "Implementation task",
+        "trigger": "User asks to implement, create, or build something",
+        "suggestion": "Consider using owlex:opencode-delegate for agentic coding"
+      }
+    ],
+    "patterns": {
+      "gemini_triggers": [
+        "analyze this codebase",
+        "review all files",
+        "understand the architecture",
+        "read these papers",
+        "summarize this document"
+      ],
+      "council_triggers": [
+        "should we",
+        "what's the best approach",
+        "trade-offs",
+        "architecture decision",
+        "design review",
+        "security audit"
+      ],
+      "codex_triggers": [
+        "review this code",
+        "find bugs in",
+        "debug this",
+        "write a PRD"
+      ],
+      "opencode_triggers": [
+        "implement",
+        "create a script",
+        "build",
+        "refactor"
+      ]
+    }
+  },
+  "note": "These are suggested patterns. Claude should use judgment based on context."
+}
