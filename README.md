@@ -59,6 +59,19 @@ Options:
 | `resume_codex_session` | Resume with session ID or `--last` |
 | `start_gemini_session` | New Gemini session |
 | `resume_gemini_session` | Resume with index or `latest` |
+| `start_opencode_session` | New OpenCode session |
+| `resume_opencode_session` | Resume with session ID or `--continue` |
+
+### Claude Code Skills
+
+Non-blocking slash commands for quick agent invocation:
+
+| Skill | Description |
+|-------|-------------|
+| `/codex` | Ask Codex a question |
+| `/gemini` | Ask Gemini a question |
+| `/council` | Run council deliberation |
+| `/critique` | Run council in critique mode |
 
 ### Async Task Management
 
