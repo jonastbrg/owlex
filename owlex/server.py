@@ -765,7 +765,10 @@ async def council_ask(
     # Early validation of roles/team to return proper error codes
     excluded = config.council.exclude_agents
     active_agents = [a for a in ["codex", "gemini", "opencode"] if a not in excluded]
-    role_spec = roles if roles is not None else team
+
+    # Use default team from config if no roles/team specified
+    effective_team = team if team is not None else config.council.default_team
+    role_spec = roles if roles is not None else effective_team
     try:
         resolver = get_resolver()
         resolved_roles = resolver.resolve(role_spec, active_agents)
@@ -791,7 +794,7 @@ async def council_ask(
             "critique": critique,
             "timeout": timeout,
             "roles": roles,
-            "team": team,
+            "team": effective_team,
         },
         context=ctx,
     )
@@ -805,7 +808,7 @@ async def council_ask(
         critique=critique,
         timeout=timeout,
         roles=roles,
-        team=team,
+        team=effective_team,
     ))
 
     # Return with role information
@@ -820,7 +823,7 @@ async def council_ask(
     response["council"] = {
         "agents": active_agents,
         "excluded": list(excluded),
-        "team": team,
+        "team": effective_team,
         "roles": role_assignments,
         "role_names": role_names,
     }

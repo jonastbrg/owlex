@@ -36,6 +36,7 @@ class OpenCodeConfig:
 class CouncilConfig:
     """Configuration for council orchestration."""
     exclude_agents: frozenset[str] = frozenset()  # Agents to exclude from council
+    default_team: str | None = None  # Default team preset when no roles/team specified
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,9 @@ def load_config() -> OwlexConfig:
         for agent in exclude_raw.split(",")
         if agent.strip()
     )
-    council = CouncilConfig(exclude_agents=exclude_agents)
+    # Parse default team (None if not set or empty)
+    default_team = os.environ.get("COUNCIL_DEFAULT_TEAM", "").strip() or None
+    council = CouncilConfig(exclude_agents=exclude_agents, default_team=default_team)
 
     try:
         timeout = int(os.environ.get("OWLEX_DEFAULT_TIMEOUT", "300"))
