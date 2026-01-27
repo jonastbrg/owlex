@@ -49,7 +49,50 @@ Options:
 - `claude_opinion` - Share your initial thinking with agents
 - `deliberate` - Enable Round 2 revision (default: true)
 - `critique` - Agents critique each other instead of revise
+- `roles` - Assign specialist roles (dict or list)
+- `team` - Use a predefined team preset
 - `timeout` - Timeout per agent in seconds (default: 300)
+
+### Specialist Roles
+
+Agents can operate with specialist perspectives that shape their analysis:
+
+| Role | Description |
+|------|-------------|
+| `security` | Security analyst - vulnerabilities, auth, data protection |
+| `perf` | Performance optimizer - efficiency, caching, scalability |
+| `skeptic` | Devil's advocate - challenge assumptions, find edge cases |
+| `architect` | System architect - design patterns, modularity, APIs |
+| `maintainer` | Code maintainer - readability, testing, tech debt |
+| `dx` | Developer experience - ergonomics, documentation, errors |
+| `testing` | Testing specialist - coverage, strategies, edge cases |
+| `neutral` | No role injection (default) |
+
+**Assign roles explicitly:**
+```
+council_ask prompt="Review this auth flow" roles={"codex": "security", "gemini": "perf"}
+```
+
+**Auto-assign from list (in agent order: codex, gemini, opencode):**
+```
+council_ask prompt="Review this code" roles=["security", "skeptic", "maintainer"]
+```
+
+### Team Presets
+
+Predefined role combinations for common scenarios:
+
+| Team | Codex | Gemini | OpenCode |
+|------|-------|--------|----------|
+| `security_audit` | security | skeptic | architect |
+| `code_review` | maintainer | perf | testing |
+| `architecture_review` | architect | perf | maintainer |
+| `devil_advocate` | skeptic | skeptic | skeptic |
+| `balanced` | security | perf | maintainer |
+
+```
+council_ask prompt="Is this design secure?" team="security_audit"
+```
 
 ### Individual Agent Sessions
 
@@ -89,6 +132,8 @@ Council runs in the background. Start a query, keep working, check results later
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COUNCIL_EXCLUDE_AGENTS` | `` | Skip agents (e.g., `opencode,gemini`) |
+| `COUNCIL_DEFAULT_TEAM` | `` | Default team when none specified (empty = neutral) |
+| `COUNCIL_CLAUDE_OPINION` | `false` | Claude shares its opinion with agents by default |
 | `OWLEX_DEFAULT_TIMEOUT` | `300` | Timeout in seconds |
 | `CODEX_BYPASS_APPROVALS` | `false` | Bypass sandbox (use with caution) |
 | `GEMINI_YOLO_MODE` | `false` | Auto-approve Gemini actions |
