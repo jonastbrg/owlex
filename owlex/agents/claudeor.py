@@ -114,6 +114,8 @@ class ClaudeORRunner(AgentRunner):
 
     def _get_env_overrides(self) -> dict[str, str]:
         """Get environment variable overrides for OpenRouter."""
+        import os
+
         env = {
             # OpenRouter requires /api not /api/v1
             "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
@@ -121,13 +123,22 @@ class ClaudeORRunner(AgentRunner):
             "ANTHROPIC_API_KEY": "",
         }
 
-        # Use ANTHROPIC_AUTH_TOKEN for OpenRouter API key (not ANTHROPIC_API_KEY)
-        if config.claudeor.api_key:
-            env["ANTHROPIC_AUTH_TOKEN"] = config.claudeor.api_key
+        # Get API key - check config first, then current environment
+        # (env vars from .mcp.json may not be available at config load time)
+        api_key = (
+            config.claudeor.api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("CLAUDEOR_API_KEY")
+        )
 
-        # Set model override if specified
-        if config.claudeor.model:
-            env["ANTHROPIC_MODEL"] = config.claudeor.model
+        # Use ANTHROPIC_AUTH_TOKEN for OpenRouter API key (not ANTHROPIC_API_KEY)
+        if api_key:
+            env["ANTHROPIC_AUTH_TOKEN"] = api_key
+
+        # Get model - check config first, then current environment
+        model = config.claudeor.model or os.environ.get("CLAUDEOR_MODEL")
+        if model:
+            env["ANTHROPIC_MODEL"] = model
 
         return env
 
