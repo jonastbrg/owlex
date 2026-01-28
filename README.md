@@ -82,13 +82,14 @@ council_ask prompt="Review this code" roles=["security", "skeptic", "maintainer"
 
 Predefined role combinations for common scenarios:
 
-| Team | Codex | Gemini | OpenCode |
-|------|-------|--------|----------|
-| `security_audit` | security | skeptic | architect |
-| `code_review` | maintainer | perf | testing |
-| `architecture_review` | architect | perf | maintainer |
-| `devil_advocate` | skeptic | skeptic | skeptic |
-| `balanced` | security | perf | maintainer |
+| Team | Codex | Gemini | OpenCode | ClaudeOR |
+|------|-------|--------|----------|----------|
+| `security_audit` | security | skeptic | architect | dx |
+| `code_review` | maintainer | perf | testing | dx |
+| `architecture_review` | architect | perf | maintainer | dx |
+| `devil_advocate` | skeptic | skeptic | skeptic | skeptic |
+| `balanced` | security | perf | maintainer | dx |
+| `optimal` | maintainer | architect | dx | skeptic |
 
 ```
 council_ask prompt="Is this design secure?" team="security_audit"
