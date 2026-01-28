@@ -115,17 +115,19 @@ class ClaudeORRunner(AgentRunner):
     def _get_env_overrides(self) -> dict[str, str]:
         """Get environment variable overrides for OpenRouter."""
         env = {
+            # OpenRouter requires /api not /api/v1
             "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
-            "ANTHROPIC_API_KEY": "",  # Must be empty
+            # Must set ANTHROPIC_API_KEY to empty to avoid conflicts
+            "ANTHROPIC_API_KEY": "",
         }
 
-        # Use API key from config
+        # Use ANTHROPIC_AUTH_TOKEN for OpenRouter API key (not ANTHROPIC_API_KEY)
         if config.claudeor.api_key:
             env["ANTHROPIC_AUTH_TOKEN"] = config.claudeor.api_key
 
         # Set model override if specified
         if config.claudeor.model:
-            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = config.claudeor.model
+            env["ANTHROPIC_MODEL"] = config.claudeor.model
 
         return env
 
