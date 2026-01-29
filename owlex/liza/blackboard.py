@@ -280,7 +280,7 @@ class Blackboard:
             FileNotFoundError: If blackboard not initialized
         """
         if not self.exists():
-            raise FileNotFoundError(f"Blackboard not found at {self.state_file}. Run liza_init first.")
+            raise FileNotFoundError(f"Blackboard not found at {self.state_file}. Run liza_start to create a task.")
 
         with open(self.state_file, "r") as f:
             # Acquire shared lock for reading
