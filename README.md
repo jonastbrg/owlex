@@ -1,13 +1,13 @@
 # Owlex
 
-[![Version](https://img.shields.io/github/v/release/agentic-mcp-tools/owlex)](https://github.com/agentic-mcp-tools/owlex/releases)
+[![Version](https://img.shields.io/github/v/release/jonastbrg/owlex)](https://github.com/jonastbrg/owlex/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue)](https://python.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple)](https://modelcontextprotocol.io)
 
-**Get a second opinion without leaving Claude Code.**
+**Multi-agent AI orchestration for Claude Code.**
 
-Different AI models have different strengths and blind spots. Owlex lets you query Codex, Gemini, and OpenCode directly from Claude Code - and optionally run a structured deliberation where they review each other's answers before Claude synthesizes a final response.
+Owlex provides access to 5 AI agents (Codex, Gemini, OpenCode, Grok, ClaudeOR) directly from Claude Code. Use them for council deliberation, peer-reviewed coding, or individual sessions with session persistence.
 
 ![Async council demo](media/owlex_async_demo.gif)
 
@@ -19,10 +19,21 @@ Different AI models have different strengths and blind spots. Owlex lets you que
 
 Use it for architecture decisions, debugging tricky issues, or when you want more confidence than a single model provides. Not for every question - for the ones that matter.
 
+## Capabilities at a Glance
+
+| Feature | Description |
+|---------|-------------|
+| **Council** | Multi-agent deliberation with 2-round revision |
+| **Liza** | Peer-supervised coding with binding review verdicts |
+| **5 Agents** | Codex, Gemini, OpenCode, Grok, ClaudeOR |
+| **Roles/Teams** | Assign specialist perspectives (security, perf, skeptic) |
+| **Session Persistence** | Resume conversations across sessions |
+| **Async Tasks** | Background execution with status polling |
+
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/agentic-mcp-tools/owlex.git
+uv tool install git+https://github.com/jonastbrg/owlex.git
 ```
 
 Add to `.mcp.json`:
@@ -49,7 +60,30 @@ Options:
 - `claude_opinion` - Share your initial thinking with agents
 - `deliberate` - Enable Round 2 revision (default: true)
 - `critique` - Agents critique each other instead of revise
+- `roles` - Assign specialist roles: `{"codex": "security", "gemini": "perf"}`
+- `team` - Use preset: `security_audit`, `code_review`, `architecture_review`, `devil_advocate`, `balanced`
 - `timeout` - Timeout per agent in seconds (default: 300)
+
+### Roles & Teams
+
+Assign specialist perspectives for focused deliberation:
+
+**Built-in Roles:**
+| Role | Focus |
+|------|-------|
+| `security` | Vulnerabilities, attack vectors, hardening |
+| `perf` | Performance, scalability, optimization |
+| `skeptic` | Find flaws, challenge assumptions |
+| `architect` | Design patterns, maintainability |
+| `maintainer` | Technical debt, long-term costs |
+| `dx` | Developer experience, usability |
+| `testing` | Test coverage, edge cases |
+
+**Team Presets:**
+```python
+council_ask(prompt="Review this auth flow", team="security_audit")
+council_ask(prompt="Architecture options?", team="architecture_review")
+```
 
 ### Individual Agent Sessions
 
@@ -59,6 +93,12 @@ Options:
 | `resume_codex_session` | Resume with session ID or `--last` |
 | `start_gemini_session` | New Gemini session |
 | `resume_gemini_session` | Resume with index or `latest` |
+| `start_opencode_session` | New OpenCode session |
+| `resume_opencode_session` | Resume previous session |
+| `start_grok_session` | New Grok session (reasoning or coding model) |
+| `resume_grok_session` | Resume previous Grok session |
+| `start_claudeor_session` | New ClaudeOR session (OpenRouter backend) |
+| `resume_claudeor_session` | Resume previous ClaudeOR session |
 
 ### Async Task Management
 
@@ -75,11 +115,16 @@ Council runs in the background. Start a query, keep working, check results later
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COUNCIL_EXCLUDE_AGENTS` | `` | Skip agents (e.g., `opencode,gemini`) |
+| `COUNCIL_EXCLUDE_AGENTS` | `` | Skip agents (e.g., `opencode,gemini,grok`) |
+| `COUNCIL_DEFAULT_TEAM` | `` | Default team preset for council |
 | `OWLEX_DEFAULT_TIMEOUT` | `300` | Timeout in seconds |
 | `CODEX_BYPASS_APPROVALS` | `false` | Bypass sandbox (use with caution) |
 | `GEMINI_YOLO_MODE` | `false` | Auto-approve Gemini actions |
 | `OPENCODE_AGENT` | `plan` | `plan` (read-only) or `build` |
+| `GROK_MODEL` | `xai/grok-4-1-fast-reasoning` | Grok reasoning model |
+| `GROK_CODE_MODEL` | `xai/grok-code-fast-1` | Grok coding model |
+| `XAI_API_KEY` | `` | xAI API key for Grok |
+| `CLAUDEOR_MODEL` | `` | Model for ClaudeOR (OpenRouter) |
 
 ## Cost Notes
 
@@ -146,8 +191,31 @@ Liza implements a peer-review loop where Claude (the coder) implements tasks and
 
 | Agent | Strengths |
 |-------|-----------|
-| **Codex (gpt5.2-codex)** | Deep reasoning, code review, bug finding |
+| **Codex** | Deep reasoning, code review, bug finding, PRD writing |
 | **Gemini** | 1M context window, multimodal, large codebases |
-| **OpenCode** | Alternative perspective, configurable models |
-| **Grok** | Deliberate contrarian, less aligned perspective |
-| **Claude** | Complex multi-step implementation, synthesis |
+| **OpenCode** | Alternative perspective, configurable backend models |
+| **Grok** | Contrarian perspective, reasoning model + coding model |
+| **ClaudeOR** | Claude via OpenRouter, alternative model access |
+| **Claude** | Complex multi-step implementation, synthesis, orchestration |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Claude Code (MCP Client)                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              │ MCP Protocol
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Owlex MCP Server                        │
+├─────────────────────────────────────────────────────────────┤
+│  Council          │  Liza              │  Individual        │
+│  Deliberation     │  Peer Review       │  Sessions          │
+├───────────────────┴──────────────────────────────────────────┤
+│                      Agent Engine                            │
+├──────┬──────┬──────────┬──────────┬────────────────────────┤
+│Codex │Gemini│ OpenCode │   Grok   │       ClaudeOR         │
+│ CLI  │ CLI  │   CLI    │  (xAI)   │     (OpenRouter)       │
+└──────┴──────┴──────────┴──────────┴────────────────────────┘
+```
