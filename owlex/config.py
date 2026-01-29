@@ -33,9 +33,28 @@ class OpenCodeConfig:
 
 
 @dataclass(frozen=True)
+class ClaudeORConfig:
+    """Configuration for Claude Code via OpenRouter integration."""
+    api_key: str | None = None  # OpenRouter API key
+    model: str | None = None  # OpenRouter model (e.g., deepseek/deepseek-v3.2)
+    clean_output: bool = True
+
+
+@dataclass(frozen=True)
+class GrokConfig:
+    """Configuration for Grok via OpenCode/xAI integration."""
+    model: str = "xai/grok-4-1-fast-reasoning"  # Model for council deliberation
+    code_model: str = "xai/grok-code-fast-1"  # Model for coding tasks
+    agent: str = "plan"  # OpenCode agent mode - "plan" (read-only) or "build" (full access)
+    clean_output: bool = True
+
+
+@dataclass(frozen=True)
 class CouncilConfig:
     """Configuration for council orchestration."""
     exclude_agents: frozenset[str] = frozenset()  # Agents to exclude from council
+    default_team: str | None = None  # Default team preset when no roles/team specified
+    include_claude_opinion: bool = False  # Whether Claude should share its opinion by default
 
 
 @dataclass(frozen=True)
@@ -44,6 +63,8 @@ class OwlexConfig:
     codex: CodexConfig
     gemini: GeminiConfig
     opencode: OpenCodeConfig
+    claudeor: ClaudeORConfig
+    grok: GrokConfig
     council: CouncilConfig
     default_timeout: int = 300
 
@@ -80,6 +101,19 @@ def load_config() -> OwlexConfig:
         clean_output=os.environ.get("OPENCODE_CLEAN_OUTPUT", "true").lower() == "true",
     )
 
+    claudeor = ClaudeORConfig(
+        api_key=os.environ.get("OPENROUTER_API_KEY") or os.environ.get("CLAUDEOR_API_KEY") or None,
+        model=os.environ.get("CLAUDEOR_MODEL") or None,
+        clean_output=os.environ.get("CLAUDEOR_CLEAN_OUTPUT", "true").lower() == "true",
+    )
+
+    grok = GrokConfig(
+        model=os.environ.get("GROK_MODEL", "xai/grok-4-1-fast-reasoning"),
+        code_model=os.environ.get("GROK_CODE_MODEL", "xai/grok-code-fast-1"),
+        agent=os.environ.get("GROK_AGENT", "plan"),
+        clean_output=os.environ.get("GROK_CLEAN_OUTPUT", "true").lower() == "true",
+    )
+
     # Parse council exclude agents (comma-separated list)
     exclude_raw = os.environ.get("COUNCIL_EXCLUDE_AGENTS", "")
     exclude_agents = frozenset(
@@ -87,7 +121,15 @@ def load_config() -> OwlexConfig:
         for agent in exclude_raw.split(",")
         if agent.strip()
     )
-    council = CouncilConfig(exclude_agents=exclude_agents)
+    # Parse default team (None if not set or empty)
+    default_team = os.environ.get("COUNCIL_DEFAULT_TEAM", "").strip() or None
+    # Parse Claude opinion setting
+    include_claude_opinion = os.environ.get("COUNCIL_CLAUDE_OPINION", "false").lower() == "true"
+    council = CouncilConfig(
+        exclude_agents=exclude_agents,
+        default_team=default_team,
+        include_claude_opinion=include_claude_opinion,
+    )
 
     try:
         timeout = int(os.environ.get("OWLEX_DEFAULT_TIMEOUT", "300"))
@@ -102,6 +144,8 @@ def load_config() -> OwlexConfig:
         codex=codex,
         gemini=gemini,
         opencode=opencode,
+        claudeor=claudeor,
+        grok=grok,
         council=council,
         default_timeout=timeout,
     )

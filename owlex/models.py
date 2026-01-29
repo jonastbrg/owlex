@@ -35,6 +35,8 @@ class Agent(str, Enum):
     CODEX = "codex"
     GEMINI = "gemini"
     OPENCODE = "opencode"
+    CLAUDEOR = "claudeor"  # Claude Code via OpenRouter
+    GROK = "grok"  # Grok via OpenCode/xAI
 
 
 @dataclass
@@ -101,6 +103,8 @@ class CouncilRound(BaseModel):
     codex: AgentResponse | None = None
     gemini: AgentResponse | None = None
     opencode: AgentResponse | None = None
+    claudeor: AgentResponse | None = None  # Claude Code via OpenRouter
+    grok: AgentResponse | None = None  # Grok via OpenCode/xAI
 
 
 class CouncilMetadata(BaseModel):
@@ -119,4 +123,7 @@ class CouncilResponse(BaseModel):
     claude_opinion: ClaudeOpinion | None = None
     round_1: CouncilRound
     round_2: CouncilRound | None = None
+    # Role assignments (None if all agents used neutral/no roles)
+    # Maps agent name to role ID, e.g., {"codex": "security", "gemini": "perf"}
+    roles: dict[str, str] | None = None
     metadata: CouncilMetadata

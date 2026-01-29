@@ -12,7 +12,7 @@ from typing import Any
 
 from .config import config
 from .models import Task, TaskStatus, AgentResponse, Agent
-from .agents import CodexRunner, GeminiRunner, OpenCodeRunner
+from .agents import CodexRunner, GeminiRunner, OpenCodeRunner, ClaudeORRunner, GrokRunner
 from .agents.base import AgentRunner, AgentCommand
 
 
@@ -38,6 +38,8 @@ def build_agent_response(
         Agent.CODEX.value: "Codex Output:\n\n",
         Agent.GEMINI.value: "Gemini Output:\n\n",
         Agent.OPENCODE.value: "OpenCode Output:\n\n",
+        Agent.CLAUDEOR.value: "Claude (OpenRouter) Output:\n\n",
+        Agent.GROK.value: "Grok Output:\n\n",
     }
     prefix = prefix_map.get(agent_name, "")
 
@@ -62,12 +64,16 @@ NotifyCallback = Callable[[str, str], Any] | None
 codex_runner = CodexRunner()
 gemini_runner = GeminiRunner()
 opencode_runner = OpenCodeRunner()
+claudeor_runner = ClaudeORRunner()
+grok_runner = GrokRunner()
 
 # Map Agent enum to runner instances
 AGENT_RUNNERS: dict[Agent, AgentRunner] = {
     Agent.CODEX: codex_runner,
     Agent.GEMINI: gemini_runner,
     Agent.OPENCODE: opencode_runner,
+    Agent.CLAUDEOR: claudeor_runner,
+    Agent.GROK: grok_runner,
 }
 
 
@@ -268,6 +274,8 @@ class TaskEngine:
         if timeout is None:
             timeout = config.default_timeout
 
+        import os as _os
+
         command = agent_cmd.command
         prompt = agent_cmd.prompt
         output_cleaner = lambda stdout, p: stdout  # Default no-op cleaner
@@ -275,18 +283,33 @@ class TaskEngine:
         cwd = agent_cmd.cwd
         not_found_hint = agent_cmd.not_found_hint
         stream = agent_cmd.stream
+        env_overrides = agent_cmd.env_overrides
+
+        # Build environment with overrides
+        env = None
+        if env_overrides:
+            env = _os.environ.copy()
+            env.update(env_overrides)
 
         try:
             task.status = TaskStatus.RUNNING.value
             task.output_lines = []
             task.stream_complete = False
 
+            # Use DEVNULL when no prompt to write (avoids hanging Claude CLI)
+            stdin_mode = (
+                asyncio.subprocess.DEVNULL
+                if (not prompt and not stream)
+                else asyncio.subprocess.PIPE
+            )
+
             process = await asyncio.create_subprocess_exec(
                 *command,
-                stdin=asyncio.subprocess.PIPE,
+                stdin=stdin_mode,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
+                env=env,
             )
 
             task.process = process
@@ -416,6 +439,7 @@ class TaskEngine:
         session_ref: str | None = None,
         enable_search: bool = False,
         timeout: int | None = None,
+        **kwargs,
     ):
         """
         Run an agent using the unified polymorphic pattern.
@@ -429,12 +453,14 @@ class TaskEngine:
             session_ref: Session reference (required for resume mode)
             enable_search: Enable web search (Codex only)
             timeout: Timeout in seconds
+            **kwargs: Additional arguments passed to the runner (e.g., for_coding for Grok)
         """
         if mode == "exec":
             agent_cmd = runner.build_exec_command(
                 prompt=prompt,
                 working_directory=working_directory,
                 enable_search=enable_search,
+                **kwargs,
             )
         elif mode == "resume":
             if session_ref is None:
@@ -444,6 +470,7 @@ class TaskEngine:
                 prompt=prompt,
                 working_directory=working_directory,
                 enable_search=enable_search,
+                **kwargs,
             )
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'exec' or 'resume'")
