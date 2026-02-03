@@ -14,6 +14,7 @@ cp -r skills/* ~/.claude/skills/
 
 | Skill | Description |
 |-------|-------------|
+| `/work` | Orchestrator mode - analyzes tasks and delegates to optimal agents via Task tool |
 | `/council` | Consult the AI council (Codex + Gemini + OpenCode + Grok) with 2-round deliberation |
 | `/codex` | Start an OpenAI Codex CLI session for deep reasoning |
 | `/gemini` | Start a Google Gemini CLI session with 1M context |
@@ -46,6 +47,28 @@ liza_submit(task_id, "Added rate limiting with Redis...")
 
 # Reviewers examine, provide feedback
 # Loop until all approve
+```
+
+### Work Skill (Orchestrator Mode)
+
+The `/work` skill activates Orchestrator Mode with Task tool delegation:
+
+```bash
+/work Implement user authentication
+
+# Claude analyzes the task:
+# 1. Loads context from Memora
+# 2. Spawns Explore agents to find existing patterns
+# 3. Routes to /liza for implementation with review
+# 4. Persists learnings at checkpoints
+```
+
+Key feature: Uses the **Task tool** to delegate to specialized agents:
+
+```python
+# Parallel exploration
+Task(subagent_type="Explore", prompt="Find auth files")
+Task(subagent_type="feature-dev:code-explorer", prompt="Analyze security patterns")
 ```
 
 ## Requirements

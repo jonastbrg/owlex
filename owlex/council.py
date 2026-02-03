@@ -100,6 +100,7 @@ class Council:
         timeout: int | None = None,
         roles: RoleSpec = None,
         team: str | None = None,
+        context_id: str | None = None,
     ) -> CouncilResponse:
         """
         Run a council deliberation session.
@@ -113,6 +114,7 @@ class Council:
             timeout: Timeout per agent in seconds
             roles: Role specification - dict, list, or None (see RoleSpec)
             team: Team preset name (alternative to roles parameter)
+            context_id: Optional shared context ID for pre-hydration and updates
 
         Role specification (mutually exclusive):
             - roles: explicit mapping or auto-assign list
@@ -128,6 +130,20 @@ class Council:
         # Validate mutual exclusivity of roles/team (consistent with MCP API)
         if roles is not None and team is not None:
             raise ValueError("Cannot specify both 'roles' and 'team' parameters. Use one or the other.")
+
+        # Load shared context if provided
+        shared_context_data = None
+        if context_id:
+            try:
+                from .context_manager import get_context_manager, ContextNotFoundError
+                manager = get_context_manager(working_directory)
+                ctx = manager.get(context_id)
+                shared_context_data = ctx.data
+                self.log(f"Loaded shared context: {context_id} (v{ctx.version})")
+            except ContextNotFoundError:
+                self.log(f"Warning: Context {context_id} not found, proceeding without")
+            except Exception as e:
+                self.log(f"Warning: Failed to load context {context_id}: {e}")
 
         if timeout is None:
             timeout = config.default_timeout

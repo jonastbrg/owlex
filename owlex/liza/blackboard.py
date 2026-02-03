@@ -113,6 +113,7 @@ class Task:
     reviews: list[ReviewRecord] = field(default_factory=list)
     last_implementation: str | None = None  # Summary of last implementation
     merged_feedback: str | None = None  # Combined feedback from all reviewers
+    reviewer_sessions: dict[str, str] = field(default_factory=dict)  # reviewer -> session_id
 
     def to_dict(self) -> dict:
         return {
@@ -130,6 +131,7 @@ class Task:
             "reviews": [r.to_dict() for r in self.reviews],
             "last_implementation": self.last_implementation,
             "merged_feedback": self.merged_feedback,
+            "reviewer_sessions": self.reviewer_sessions,
         }
 
     @classmethod
@@ -149,6 +151,7 @@ class Task:
             reviews=[ReviewRecord.from_dict(r) for r in data.get("reviews", [])],
             last_implementation=data.get("last_implementation"),
             merged_feedback=data.get("merged_feedback"),
+            reviewer_sessions=data.get("reviewer_sessions", {}),
         )
 
     def add_history(self, event: str, agent: str | None = None, details: dict | None = None):
@@ -211,27 +214,72 @@ class BlackboardState:
         )
 
 
+def _detect_worktree_name(working_directory: Path) -> str | None:
+    """
+    Detect if working_directory is a git worktree and return its name.
+
+    Returns:
+        Worktree name (branch name) if in a worktree, None otherwise.
+    """
+    git_dir = working_directory / ".git"
+    if not git_dir.exists():
+        return None
+
+    # If .git is a file (not directory), this is a worktree
+    if git_dir.is_file():
+        try:
+            # .git file contains: gitdir: /path/to/main/.git/worktrees/<name>
+            content = git_dir.read_text().strip()
+            if content.startswith("gitdir:"):
+                gitdir_path = content.split(":", 1)[1].strip()
+                # Extract worktree name from path
+                if "/worktrees/" in gitdir_path:
+                    return gitdir_path.split("/worktrees/")[-1].rstrip("/")
+        except Exception:
+            pass
+        return None
+
+    # If .git is a directory, check if we're in the main worktree
+    # Main worktree has no special name
+    return None
+
+
 class Blackboard:
     """
     Blackboard state manager with file-based persistence.
 
     Provides atomic read/write operations with file locking.
+    Supports per-worktree state isolation.
     """
 
     DEFAULT_DIR = ".owlex"
     DEFAULT_FILE = "liza-state.yaml"
 
-    def __init__(self, working_directory: str | None = None):
+    def __init__(self, working_directory: str | None = None, worktree: str | None = None):
         """
         Initialize blackboard.
 
         Args:
             working_directory: Directory containing .owlex/. Defaults to CWD.
+            worktree: Explicit worktree name for isolation. If None, auto-detected.
+                      Use "main" for the main worktree, or branch name for worktrees.
         """
         if working_directory is None:
             working_directory = os.getcwd()
         self.working_directory = Path(working_directory)
+
+        # Detect or use provided worktree name
+        if worktree is not None:
+            self.worktree = worktree
+        else:
+            self.worktree = _detect_worktree_name(self.working_directory)
+
+        # Set up paths based on worktree isolation
         self.state_dir = self.working_directory / self.DEFAULT_DIR
+        if self.worktree:
+            # Per-worktree subdirectory: .owlex/<worktree>/liza-state.yaml
+            self.state_dir = self.state_dir / self.worktree
+
         self.state_file = self.state_dir / self.DEFAULT_FILE
         self.lock_file = self.state_dir / f"{self.DEFAULT_FILE}.lock"
 
@@ -280,7 +328,7 @@ class Blackboard:
             FileNotFoundError: If blackboard not initialized
         """
         if not self.exists():
-            raise FileNotFoundError(f"Blackboard not found at {self.state_file}. Run liza_init first.")
+            raise FileNotFoundError(f"Blackboard not found at {self.state_file}. Run liza_start to create a task.")
 
         with open(self.state_file, "r") as f:
             # Acquire shared lock for reading

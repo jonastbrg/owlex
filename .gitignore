@@ -35,3 +35,9 @@ uv.lock
 # Runtime data
 data/
 .aider*
+framework/
+
+# Runtime state
+.owlex/*.db
+.owlex/*.db-*
+.owlex/liza-state.yaml

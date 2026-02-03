@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 from pydantic import Field
@@ -538,7 +539,7 @@ async def start_grok_session(
     Uses OpenCode CLI with xAI/Grok models. Requires XAI_API_KEY environment variable.
 
     Two model options:
-    - for_coding=False (default): Uses GROK_MODEL (default: xai/grok-4-1-fast-reasoning) for reasoning/deliberation
+    - for_coding=False (default): Uses GROK_MODEL (default: xai/grok-4-1-fast) for reasoning/deliberation
     - for_coding=True: Uses GROK_CODE_MODEL (default: xai/grok-code-fast-1) for coding tasks
     """
     if not prompt or not prompt.strip():
@@ -874,6 +875,7 @@ async def _run_council_deliberation(
     timeout: int,
     roles: dict[str, str] | list[str] | None = None,
     team: str | None = None,
+    context_id: str | None = None,
 ):
     """Run council deliberation and update task with result."""
     from .models import TaskStatus
@@ -889,6 +891,7 @@ async def _run_council_deliberation(
             timeout=timeout,
             roles=roles,
             team=team,
+            context_id=context_id,
         )
         task.result = response.model_dump_json(indent=2)
         task.status = TaskStatus.COMPLETED.value
@@ -927,6 +930,13 @@ async def council_ask(
         description=(
             "Team preset name (alternative to roles). "
             "Built-in teams: security_audit, code_review, architecture_review, devil_advocate, balanced"
+        )
+    ),
+    context_id: str | None = Field(
+        default=None,
+        description=(
+            "Shared context ID for pre-hydration. If provided, context data is loaded "
+            "and made available to agents, reducing token duplication."
         )
     ),
 ) -> dict:
@@ -1005,6 +1015,7 @@ async def council_ask(
             "timeout": timeout,
             "roles": roles,
             "team": effective_team,
+            "context_id": context_id,
         },
         context=ctx,
     )
@@ -1019,6 +1030,7 @@ async def council_ask(
         timeout=timeout,
         roles=roles,
         team=effective_team,
+        context_id=context_id,
     ))
 
     # Return with role information
@@ -1037,6 +1049,7 @@ async def council_ask(
         "roles": role_assignments,
         "role_names": role_names,
         "include_claude_opinion": config.council.include_claude_opinion,
+        "context_id": context_id,
     }
 
     return response
@@ -1060,9 +1073,15 @@ def _get_liza_orchestrator(working_directory: str | None = None) -> "LizaOrchest
         )
         orchestrator = LizaOrchestrator(config=config_obj)
 
-        # Set up the reviewer runner to use owlex agents
-        async def run_reviewer(agent: str, prompt: str, working_dir: str | None, timeout: int) -> str | None:
-            """Run a reviewer agent via owlex."""
+        # Set up the reviewer runner to use owlex agents with session persistence
+        async def run_reviewer(
+            agent: str,
+            prompt: str,
+            working_dir: str | None,
+            timeout: int,
+            task_id: str,
+        ) -> str | None:
+            """Run a reviewer agent via owlex, with session persistence for iterations."""
             runner_map = {
                 "codex": codex_runner,
                 "gemini": gemini_runner,
@@ -1073,20 +1092,53 @@ def _get_liza_orchestrator(working_directory: str | None = None) -> "LizaOrchest
             if runner is None:
                 return None
 
-            task = engine.create_task(
+            # Get existing session ID from blackboard (for resume on iterations 2+)
+            liza_task = orchestrator.blackboard.get_task(task_id)
+            existing_session = liza_task.reviewer_sessions.get(agent) if liza_task else None
+
+            # Record start time for session ID parsing
+            start_mtime = time.time()
+
+            engine_task = engine.create_task(
                 command=f"liza_review_{agent}",
                 args={"prompt": prompt, "working_directory": working_dir},
                 context=None,
             )
 
-            await engine.run_agent(
-                task, runner, mode="exec",
-                prompt=prompt, working_directory=working_dir,
-                **({"enable_search": False} if agent == "codex" else {})
-            )
+            if existing_session:
+                # Resume existing session (iteration 2+)
+                _log(f"Resuming {agent} session: {existing_session}")
+                await engine.run_agent(
+                    engine_task, runner, mode="resume",
+                    session_ref=existing_session,
+                    prompt=prompt, working_directory=working_dir,
+                    **({"enable_search": False} if agent == "codex" else {})
+                )
+            else:
+                # Start new session (iteration 1)
+                await engine.run_agent(
+                    engine_task, runner, mode="exec",
+                    prompt=prompt, working_directory=working_dir,
+                    **({"enable_search": False} if agent == "codex" else {})
+                )
 
-            if task.status == "completed":
-                return task.result
+            # Capture session ID for next iteration
+            if engine_task.status == "completed" and liza_task and not existing_session:
+                try:
+                    session_id = await runner.parse_session_id(
+                        engine_task.result or "",
+                        since_mtime=start_mtime,
+                        working_directory=working_dir,
+                    )
+                    if session_id:
+                        liza_task.reviewer_sessions[agent] = session_id
+                        orchestrator.blackboard.update_task(liza_task)
+                        _log(f"Captured {agent} session: {session_id}")
+                except Exception as e:
+                    _log(f"Warning: Failed to parse session ID for {agent}: {e}")
+
+            if engine_task.status == "completed":
+                return engine_task.result
             return None
 
         orchestrator.set_reviewer_runner(run_reviewer)
@@ -1374,6 +1426,524 @@ def liza_blackboard_resource() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error reading blackboard: {e}"
+
+
+# === Context Tools (Shared Agent Context) ===
+
+# Module-level ContextManager instances (per working directory)
+_context_managers: dict[str, "ContextManager"] = {}
+
+
+def _get_context_manager(working_directory: str | None = None) -> "ContextManager":
+    """Get or create a ContextManager for the working directory."""
+    from .context_manager import ContextManager, ContextManagerConfig
+
+    wd = working_directory or os.getcwd()
+    if wd not in _context_managers:
+        config = ContextManagerConfig(working_directory=wd)
+        _context_managers[wd] = ContextManager(config)
+
+    return _context_managers[wd]
+
+
+@mcp.tool()
+async def create_context(
+    ctx: Context[ServerSession, None],
+    namespace: str = Field(description="Namespace for isolation (e.g., 'task:123', 'worktree:feature-x', 'council:session-1')"),
+    data: dict = Field(description="Context data to store (JSON object)"),
+    ttl_days: int | None = Field(default=None, description="Time-to-live in days (default: 7)"),
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    Create a new shared context that agents can read/write.
+
+    Use this to share context between agents without duplicating it in prompts.
+    For example, create a context with task requirements that multiple agents
+    can reference during a council deliberation.
+
+    Returns context_id and version for future updates.
+    """
+    if not namespace or not namespace.strip():
+        return {"success": False, "error": "'namespace' is required."}
+    if not isinstance(data, dict):
+        return {"success": False, "error": "'data' must be a JSON object."}
+
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        manager = _get_context_manager(working_directory)
+        context = manager.create(
+            namespace=namespace.strip(),
+            data=data,
+            ttl_days=ttl_days,
+        )
+
+        return {
+            "success": True,
+            "context_id": context.id,
+            "version": context.version,
+            "namespace": context.namespace,
+            "size_bytes": context.size_bytes,
+            "expires_at": context.expires_at.isoformat() if context.expires_at else None,
+            "message": f"Context created. Use context_id '{context.id}' and version {context.version} for updates.",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def get_context(
+    ctx: Context[ServerSession, None],
+    context_id: str = Field(description="Context ID to retrieve"),
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    Get a shared context by ID.
+
+    Returns the context data and current version. The version is needed
+    for updates to ensure optimistic concurrency.
+    """
+    if not context_id or not context_id.strip():
+        return {"success": False, "error": "'context_id' is required."}
+
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        from .context_manager import ContextNotFoundError
+
+        manager = _get_context_manager(working_directory)
+        context = manager.get(context_id.strip())
+
+        return {
+            "success": True,
+            "context_id": context.id,
+            "namespace": context.namespace,
+            "data": context.data,
+            "version": context.version,
+            "size_bytes": context.size_bytes,
+            "created_at": context.created_at.isoformat(),
+            "updated_at": context.updated_at.isoformat(),
+            "expires_at": context.expires_at.isoformat() if context.expires_at else None,
+        }
+    except ContextNotFoundError:
+        return {"success": False, "error": f"Context '{context_id}' not found."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def update_context(
+    ctx: Context[ServerSession, None],
+    context_id: str = Field(description="Context ID to update"),
+    updates: dict = Field(description="Data updates to apply (merged with existing data)"),
+    version: int = Field(description="Expected current version (for optimistic locking)"),
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    Update a shared context with optimistic concurrency.
+
+    The version parameter must match the current version in the database.
+    If another agent has updated the context since you read it, this will
+    fail with a version conflict error. In that case, re-read the context
+    to get the latest version and try again.
+
+    Updates are merged with existing data (not replaced).
+    """
+    if not context_id or not context_id.strip():
+        return {"success": False, "error": "'context_id' is required."}
+    if not isinstance(updates, dict):
+        return {"success": False, "error": "'updates' must be a JSON object."}
+    if version is None:
+        return {"success": False, "error": "'version' is required for optimistic locking."}
+
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        from .context_manager import ContextNotFoundError, VersionConflictError
+
+        manager = _get_context_manager(working_directory)
+        context = manager.update(
+            context_id=context_id.strip(),
+            updates=updates,
+            version=version,
+        )
+
+        return {
+            "success": True,
+            "context_id": context.id,
+            "new_version": context.version,
+            "size_bytes": context.size_bytes,
+            "message": f"Context updated. New version is {context.version}.",
+        }
+    except ContextNotFoundError:
+        return {"success": False, "error": f"Context '{context_id}' not found."}
+    except VersionConflictError as e:
+        return {
+            "success": False,
+            "error": "version_conflict",
+            "message": str(e),
+            "expected_version": e.expected_version,
+            "actual_version": e.actual_version,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def list_contexts(
+    ctx: Context[ServerSession, None],
+    namespace: str | None = Field(default=None, description="Filter by namespace (exact match)"),
+    limit: int = Field(default=20, description="Maximum number of contexts to return"),
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    List shared contexts, optionally filtered by namespace.
+
+    Returns summaries (without full data) for efficiency.
+    Use get_context to retrieve full data for a specific context.
+    """
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        manager = _get_context_manager(working_directory)
+        contexts = manager.list(
+            namespace=namespace.strip() if namespace else None,
+            limit=limit,
+        )
+
+        return {
+            "success": True,
+            "count": len(contexts),
+            "contexts": [c.to_dict() for c in contexts],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def delete_context(
+    ctx: Context[ServerSession, None],
+    context_id: str = Field(description="Context ID to delete"),
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    Delete a shared context.
+
+    This permanently removes the context. Use with caution.
+    """
+    if not context_id or not context_id.strip():
+        return {"success": False, "error": "'context_id' is required."}
+
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        manager = _get_context_manager(working_directory)
+        deleted = manager.delete(context_id.strip())
+
+        if deleted:
+            return {
+                "success": True,
+                "message": f"Context '{context_id}' deleted.",
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Context '{context_id}' not found.",
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def vacuum_contexts(
+    ctx: Context[ServerSession, None],
+    working_directory: str | None = Field(default=None, description="Working directory for context storage"),
+) -> dict:
+    """
+    Clean up expired and over-quota contexts.
+
+    Performs:
+    1. Delete all expired contexts (past TTL)
+    2. If over size quota (500MB), delete oldest by access time until under quota
+
+    Returns statistics about cleanup.
+    """
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        manager = _get_context_manager(working_directory)
+        stats = manager.vacuum()
+
+        return {
+            "success": True,
+            **stats,
+            "message": f"Cleaned up {stats['total_deleted']} contexts.",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.resource("owlex://contexts/stats")
+def context_stats_resource() -> str:
+    """View context storage statistics."""
+    try:
+        manager = _get_context_manager()
+        stats = manager.get_stats()
+
+        lines = [
+            "# Context Storage Statistics",
+            "",
+            f"**Total Contexts:** {stats['context_count']}",
+            f"**Namespaces:** {stats['namespace_count']}",
+            f"**Total Size:** {stats['total_size_bytes'] / 1024 / 1024:.2f} MB",
+            f"**Quota Usage:** {stats['quota_usage_percent']:.1f}%",
+            f"**Max Size:** {stats['max_size_bytes'] / 1024 / 1024:.0f} MB",
+            f"**Max Age:** {stats['max_age_days']} days",
+            f"**Expired (pending cleanup):** {stats['expired_count']}",
+            "",
+            f"**Oldest Created:** {stats['oldest_created'] or 'N/A'}",
+            f"**Newest Updated:** {stats['newest_updated'] or 'N/A'}",
+        ]
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting context stats: {e}"
+
+
+# === Git Worktree Tools ===
+
+import subprocess
+
+
+def _run_git_command(args: list[str], cwd: str | None = None) -> tuple[bool, str, str]:
+    """Run a git command and return (success, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return False, "", "Command timed out"
+    except Exception as e:
+        return False, "", str(e)
+
+
+@mcp.tool()
+async def create_worktree(
+    ctx: Context[ServerSession, None],
+    branch: str = Field(description="Branch name for the worktree (created if doesn't exist)"),
+    path: str | None = Field(default=None, description="Path for worktree (default: worktrees/<branch>)"),
+    base_branch: str = Field(default="HEAD", description="Base branch to create from (if creating new branch)"),
+    working_directory: str | None = Field(default=None, description="Git repository directory"),
+) -> dict:
+    """
+    Create a git worktree for parallel task isolation.
+
+    Each worktree has its own working directory and can be on a different branch,
+    enabling parallel development without conflicts. The Liza blackboard is
+    automatically isolated per worktree.
+
+    Example:
+        create_worktree(branch="feature-auth")
+        # Creates worktrees/feature-auth/ with its own .owlex/feature-auth/liza-state.yaml
+    """
+    if not branch or not branch.strip():
+        return {"success": False, "error": "'branch' is required."}
+
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    wd = working_directory or os.getcwd()
+
+    # Validate git repository
+    success, _, stderr = _run_git_command(["rev-parse", "--git-dir"], cwd=wd)
+    if not success:
+        return {"success": False, "error": f"Not a git repository: {stderr}"}
+
+    branch = branch.strip()
+    # Default path: worktrees/<branch>
+    worktree_path = path if path else f"worktrees/{branch}"
+    full_path = os.path.join(wd, worktree_path)
+
+    # Check if worktree already exists
+    if os.path.exists(full_path):
+        return {"success": False, "error": f"Path already exists: {worktree_path}"}
+
+    # Check if branch exists
+    success, _, _ = _run_git_command(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=wd)
+    branch_exists = success
+
+    if branch_exists:
+        # Worktree with existing branch
+        success, stdout, stderr = _run_git_command(
+            ["worktree", "add", worktree_path, branch],
+            cwd=wd,
+        )
+    else:
+        # Create new branch from base
+        success, stdout, stderr = _run_git_command(
+            ["worktree", "add", "-b", branch, worktree_path, base_branch],
+            cwd=wd,
+        )
+
+    if not success:
+        return {"success": False, "error": f"Failed to create worktree: {stderr}"}
+
+    return {
+        "success": True,
+        "branch": branch,
+        "path": worktree_path,
+        "full_path": full_path,
+        "created_branch": not branch_exists,
+        "message": f"Worktree created at {worktree_path}. Liza state will be isolated to .owlex/{branch}/",
+    }
+
+
+@mcp.tool()
+async def list_worktrees(
+    ctx: Context[ServerSession, None],
+    working_directory: str | None = Field(default=None, description="Git repository directory"),
+) -> dict:
+    """
+    List all git worktrees in the repository.
+
+    Returns information about each worktree including path, branch, and commit.
+    """
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    wd = working_directory or os.getcwd()
+
+    # Validate git repository
+    success, _, stderr = _run_git_command(["rev-parse", "--git-dir"], cwd=wd)
+    if not success:
+        return {"success": False, "error": f"Not a git repository: {stderr}"}
+
+    # List worktrees in porcelain format
+    success, stdout, stderr = _run_git_command(["worktree", "list", "--porcelain"], cwd=wd)
+    if not success:
+        return {"success": False, "error": f"Failed to list worktrees: {stderr}"}
+
+    worktrees = []
+    current = {}
+
+    for line in stdout.split("\n"):
+        if not line:
+            if current:
+                worktrees.append(current)
+                current = {}
+            continue
+
+        if line.startswith("worktree "):
+            current["path"] = line[9:]
+        elif line.startswith("HEAD "):
+            current["commit"] = line[5:]
+        elif line.startswith("branch "):
+            current["branch"] = line[7:].replace("refs/heads/", "")
+        elif line == "detached":
+            current["detached"] = True
+        elif line == "bare":
+            current["bare"] = True
+
+    if current:
+        worktrees.append(current)
+
+    return {
+        "success": True,
+        "count": len(worktrees),
+        "worktrees": worktrees,
+    }
+
+
+@mcp.tool()
+async def prune_worktrees(
+    ctx: Context[ServerSession, None],
+    working_directory: str | None = Field(default=None, description="Git repository directory"),
+    dry_run: bool = Field(default=True, description="If true, only report what would be pruned"),
+) -> dict:
+    """
+    Prune stale git worktree entries.
+
+    Removes worktree entries for paths that no longer exist.
+    Use dry_run=True (default) to preview before actually pruning.
+    """
+    working_directory, error = _validate_working_directory(working_directory)
+    if error:
+        return {"success": False, "error": error}
+
+    wd = working_directory or os.getcwd()
+
+    # Validate git repository
+    success, _, stderr = _run_git_command(["rev-parse", "--git-dir"], cwd=wd)
+    if not success:
+        return {"success": False, "error": f"Not a git repository: {stderr}"}
+
+    args = ["worktree", "prune"]
+    if dry_run:
+        args.append("--dry-run")
+    args.append("-v")
+
+    success, stdout, stderr = _run_git_command(args, cwd=wd)
+    if not success:
+        return {"success": False, "error": f"Failed to prune worktrees: {stderr}"}
+
+    # Parse output for pruned entries
+    pruned = []
+    for line in (stdout + "\n" + stderr).split("\n"):
+        if "Removing" in line or "pruning" in line.lower():
+            pruned.append(line.strip())
+
+    return {
+        "success": True,
+        "dry_run": dry_run,
+        "pruned_count": len(pruned),
+        "pruned": pruned,
+        "message": f"{'Would prune' if dry_run else 'Pruned'} {len(pruned)} stale worktree(s).",
+    }
+
+
+@mcp.resource("owlex://worktrees")
+def worktrees_resource() -> str:
+    """View git worktrees in current repository."""
+    try:
+        wd = os.getcwd()
+        success, _, stderr = _run_git_command(["rev-parse", "--git-dir"], cwd=wd)
+        if not success:
+            return f"Not a git repository: {stderr}"
+
+        success, stdout, stderr = _run_git_command(["worktree", "list"], cwd=wd)
+        if not success:
+            return f"Failed to list worktrees: {stderr}"
+
+        lines = [
+            "# Git Worktrees",
+            "",
+            "```",
+            stdout,
+            "```",
+        ]
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing worktrees: {e}"
 
 
 def main():

@@ -122,7 +122,17 @@ class GeminiRunner(AgentRunner):
         """Build command for starting a new Gemini session."""
         full_command = ["gemini"]
 
-        if config.gemini.yolo_mode:
+        # Approval mode handling (in order of precedence):
+        # 1. allowed_tools - most targeted (safest)
+        # 2. approval_mode - medium safety ("auto_edit" recommended)
+        # 3. yolo_mode - least safe (approves everything)
+        if config.gemini.allowed_tools:
+            # Use --allowed-tools for specific tool permissions
+            full_command.extend(["--allowed-tools", ",".join(config.gemini.allowed_tools)])
+        elif config.gemini.approval_mode:
+            # Use specified approval mode (e.g., "auto_edit")
+            full_command.extend(["--approval-mode", config.gemini.approval_mode])
+        elif config.gemini.yolo_mode:
             full_command.extend(["--approval-mode", "yolo"])
 
         if working_directory:
@@ -151,7 +161,12 @@ class GeminiRunner(AgentRunner):
         """Build command for resuming an existing Gemini session."""
         full_command = ["gemini"]
 
-        if config.gemini.yolo_mode:
+        # Same approval mode handling as build_exec_command
+        if config.gemini.allowed_tools:
+            full_command.extend(["--allowed-tools", ",".join(config.gemini.allowed_tools)])
+        elif config.gemini.approval_mode:
+            full_command.extend(["--approval-mode", config.gemini.approval_mode])
+        elif config.gemini.yolo_mode:
             full_command.extend(["--approval-mode", "yolo"])
 
         if working_directory:

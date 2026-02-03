@@ -19,7 +19,9 @@ class CodexConfig:
 @dataclass(frozen=True)
 class GeminiConfig:
     """Configuration for Gemini CLI integration."""
-    yolo_mode: bool = False
+    yolo_mode: bool = False  # Full auto-approve (dangerous)
+    approval_mode: str | None = None  # "auto_edit" or "yolo" - safer than yolo_mode
+    allowed_tools: list[str] | None = None  # Specific tools to allow (safest)
     clean_output: bool = True
 
 
@@ -43,9 +45,9 @@ class ClaudeORConfig:
 @dataclass(frozen=True)
 class GrokConfig:
     """Configuration for Grok via OpenCode/xAI integration."""
-    model: str = "xai/grok-4-1-fast-reasoning"  # Model for council deliberation
+    model: str = "xai/grok-4-1-fast"  # Model for council deliberation (reasoning mode)
     code_model: str = "xai/grok-code-fast-1"  # Model for coding tasks
-    agent: str = "plan"  # OpenCode agent mode - "plan" (read-only) or "build" (full access)
+    agent: str = "build"  # OpenCode agent mode - "build" (full access) or "plan" (read-only)
     clean_output: bool = True
 
 
@@ -89,8 +91,17 @@ def load_config() -> OwlexConfig:
         enable_search=os.environ.get("CODEX_ENABLE_SEARCH", "true").lower() == "true",
     )
 
+    # Parse allowed tools (comma-separated list)
+    gemini_allowed_tools_raw = os.environ.get("GEMINI_ALLOWED_TOOLS", "")
+    gemini_allowed_tools = (
+        [t.strip() for t in gemini_allowed_tools_raw.split(",") if t.strip()]
+        if gemini_allowed_tools_raw else None
+    )
+
     gemini = GeminiConfig(
         yolo_mode=os.environ.get("GEMINI_YOLO_MODE", "false").lower() == "true",
+        approval_mode=os.environ.get("GEMINI_APPROVAL_MODE") or None,  # "auto_edit" or "yolo"
+        allowed_tools=gemini_allowed_tools,  # e.g., "write_file,edit_file,read_file"
         clean_output=os.environ.get("GEMINI_CLEAN_OUTPUT", "true").lower() == "true",
     )
 
@@ -108,9 +119,9 @@ def load_config() -> OwlexConfig:
     )
 
     grok = GrokConfig(
-        model=os.environ.get("GROK_MODEL", "xai/grok-4-1-fast-reasoning"),
+        model=os.environ.get("GROK_MODEL", "xai/grok-4-1-fast"),
         code_model=os.environ.get("GROK_CODE_MODEL", "xai/grok-code-fast-1"),
-        agent=os.environ.get("GROK_AGENT", "plan"),
+        agent=os.environ.get("GROK_AGENT", "build"),
         clean_output=os.environ.get("GROK_CLEAN_OUTPUT", "true").lower() == "true",
     )
 

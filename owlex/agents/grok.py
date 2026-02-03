@@ -114,7 +114,7 @@ class GrokRunner(AgentRunner):
     Uses OpenCode with xAI/Grok models. Requires XAI_API_KEY environment variable.
 
     Two model configurations:
-    - GROK_MODEL: Model for council deliberation (default: xai/grok-4-1-fast-reasoning)
+    - GROK_MODEL: Model for council deliberation (default: xai/grok-4-1-fast)
     - GROK_CODE_MODEL: Model for coding tasks (default: xai/grok-code-fast-1)
     """
 

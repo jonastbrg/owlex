@@ -97,7 +97,8 @@ class LizaResult:
 
 
 # Type for reviewer runner function (calls owlex agents)
-ReviewerRunner = Callable[[str, str, str | None, int], Awaitable[str | None]]
+# Parameters: agent, prompt, working_dir, timeout, task_id
+ReviewerRunner = Callable[[str, str, str | None, int, str], Awaitable[str | None]]
 
 
 class LizaOrchestrator:
@@ -156,6 +157,7 @@ class LizaOrchestrator:
         self,
         agent: str,
         prompt: str,
+        task_id: str,
     ) -> str | None:
         """Run a reviewer agent with the given prompt."""
         if self._reviewer_runner is None:
@@ -166,6 +168,7 @@ class LizaOrchestrator:
             prompt,
             self.config.working_directory,
             self.config.timeout_per_agent,
+            task_id,
         )
 
     async def submit_for_review(
@@ -306,7 +309,7 @@ class LizaOrchestrator:
             critique_mode=self.config.critique_mode,
         )
 
-        response = await self.run_reviewer(reviewer, reviewer_prompt)
+        response = await self.run_reviewer(reviewer, reviewer_prompt, task.id)
 
         if response is None:
             return ReviewVerdict(
@@ -324,7 +327,7 @@ class LizaOrchestrator:
         """
         Prepare task for next iteration after rejection.
 
-        Updates blackboard state for Claude to iterate.
+        Updates blackboard state and shared context for Claude to iterate.
 
         Args:
             task_id: Task to update
@@ -345,17 +348,54 @@ class LizaOrchestrator:
         })
 
         self.blackboard.update_task(task)
+
+        # Update context with merged feedback for this iteration
+        try:
+            from ..context_manager import get_context_manager
+            manager = get_context_manager(self.config.working_directory)
+            contexts = manager.list(namespace=f"task:{task_id}", limit=1)
+            if contexts:
+                ctx = manager.get(contexts[0].id)
+                manager.update(
+                    context_id=ctx.id,
+                    updates={
+                        "status": "WORKING",
+                        "iteration": task.iteration,
+                        "merged_feedback": merged_feedback,
+                    },
+                    version=ctx.version,
+                )
+        except Exception as e:
+            self.log(f"Warning: Failed to update context for task {task_id}: {e}")
+
         self.log(f"Prepared for iteration {task.iteration}")
 
         return task
 
     def mark_approved(self, task_id: str) -> Task:
-        """Mark task as approved and complete."""
-        return self.blackboard.transition_task(
+        """Mark task as approved and complete. Auto-expires task context."""
+        task = self.blackboard.transition_task(
             task_id, TaskStatus.APPROVED,
             agent="liza",
             details={"approved_by": "reviewers"},
         )
+
+        # Update context with final status and short TTL for cleanup
+        try:
+            from ..context_manager import get_context_manager
+            manager = get_context_manager(self.config.working_directory)
+            contexts = manager.list(namespace=f"task:{task_id}", limit=1)
+            if contexts:
+                ctx = manager.get(contexts[0].id)
+                manager.update(
+                    context_id=ctx.id,
+                    updates={"status": "APPROVED", "completed": True},
+                    version=ctx.version,
+                )
+        except Exception as e:
+            self.log(f"Warning: Failed to update context for task {task_id}: {e}")
+
+        return task
 
     def mark_blocked(self, task_id: str, reason: str) -> Task:
         """Mark task as blocked."""
@@ -375,6 +415,8 @@ class LizaOrchestrator:
     ) -> Task:
         """
         Create a new task for Claude to implement.
+
+        Auto-creates a shared context in namespace `task:{task_id}` for the task.
 
         Args:
             description: What to implement
@@ -400,6 +442,25 @@ class LizaOrchestrator:
         # Claude claims the task
         task.add_history("claimed_by_claude")
         self.blackboard.update_task(task)
+
+        # Auto-create shared context for this task
+        try:
+            from ..context_manager import get_context_manager
+            manager = get_context_manager(self.config.working_directory)
+            context = manager.create(
+                namespace=f"task:{task.id}",
+                data={
+                    "task_id": task.id,
+                    "description": description,
+                    "reviewers": reviewers or self.config.reviewers,
+                    "max_iterations": max_iterations or self.config.max_iterations,
+                    "done_when": done_when,
+                    "status": "WORKING",
+                },
+            )
+            self.log(f"Created context {context.id} for task {task.id}")
+        except Exception as e:
+            self.log(f"Warning: Failed to create context for task {task.id}: {e}")
 
         self.log(f"Created task {task.id}: {description[:50]}...")
         return task

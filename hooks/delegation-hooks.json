@@ -1,8 +1,22 @@
 {
   "PreToolUse": [
     {
-      "matcher": "",
-      "hooks": []
+      "matcher": "mcp__owlex__liza_start",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "echo '## FRAMEWORK PROTOCOL\n\n**Before implementing:**\n1. Use Task(subagent_type=\"Explore\") for codebase discovery - NOT manual Grep/Glob\n2. Parallelize independent agent calls in ONE message\n3. Check .owlex/liza-state.yaml for existing task state\n\n**During implementation:**\n- Follow Coder Contract: no fabrication, no test corruption, no scope creep\n- Be honest about assumptions and limitations\n\n**After implementing:**\n- Call liza_submit with implementation summary\n- ALL reviewers must APPROVE before task is complete\n- If REJECTED: fix issues and resubmit\n\n**Linear Integration:**\n- Issues auto-assigned to Jonathan Steinberg (human) + @Agent (AI)\n- Assign agents via @mention: @Claude Coder, @Gemini Researcher, @Codex\n- Status auto-syncs: WORKING→In Progress, IN_REVIEW→In Review, APPROVED→Done\n- Webhook acknowledges within 10s, then creates Liza task from issue'"
+        }
+      ]
+    },
+    {
+      "matcher": "EnterPlanMode",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "if [ -d .owlex ] || [ -d framework ]; then echo '## PLANNING WITH FRAMEWORK\n\nThis project uses the Liza framework. Your plan should:\n1. Start with liza_start(task_description)\n2. Use Task tool with Explore agents for codebase discovery\n3. Parallelize independent searches in one message\n4. End with liza_submit for external review\n\n**Routing:** Implementation → /liza | Architecture decisions → /council\n\n**Linear Integration:**\n- Issues assigned to: Jonathan Steinberg (human) + AI agent\n- Assign agents via @mention: @Claude Coder, @Gemini Researcher, @Codex\n- Status syncs: WORKING→In Progress, IN_REVIEW→In Review, APPROVED→Done\n- Issue context in .owlex/liza-state.yaml (has linear_issue_id)'; fi"
+        }
+      ]
     }
   ],
   "UserPromptSubmit": [
