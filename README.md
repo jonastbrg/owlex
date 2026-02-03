@@ -7,14 +7,21 @@ Central status hub for research projects. Human-readable, git-versioned, agent-a
 | Project | Status | Progress | Current Focus | Priority |
 |---------|--------|----------|---------------|----------|
 | [lightwheel-integration](./lightwheel-integration/STATUS.md) | Planning Complete | 0% | Ready for Phase 0 implementation | P0 |
+| [redteam](./redteam/STATUS.md) | Active | 85% | TAP/PAIR/Crescendo orchestrators | P0 |
+| [vla-eval](./vla-eval/STATUS.md) | Active | 70% | VLA attack pipeline | P0 |
+| [vlm-interp](./vlm-interp/STATUS.md) | Active | 65% | Circuit breakers, safety probes | P1 |
 | [attacker-as-defender](./attacker-as-defender/STATUS.md) | Active | - | Stage 1 dataset collection | P1 |
-| [framework](./framework/STATUS.md) | Maintenance | - | Linear integration stable | P2 |
+| [typographic](./typographic/STATUS.md) | Active | 30% | Visual text attacks | P2 |
+| [amber](./amber/STATUS.md) | Planning | 20% | Benchmark generation | P2 |
+| [framework](./framework/STATUS.md) | Maintenance | - | Linear integration stable | P3 |
+| [robospy](./robospy/STATUS.md) | Dormant | 40% | Privacy analysis (on hold) | P3 |
 
 ## This Week's Priorities
 
 1. **Lightwheel Integration**: Begin Phase 0 - DB schema, GCP infra, Temporal setup
-2. **Attacker-as-Defender**: Build Stage 1 curriculum datasets
-3. **Framework**: Bug fixes only (no new features)
+2. **Redteam + VLA-Eval**: Continue attack orchestrator refinement
+3. **Attacker-as-Defender**: Build Stage 1 curriculum datasets
+4. **Framework**: Bug fixes only (no new features)
 
 ## Cross-Project Notes
 
