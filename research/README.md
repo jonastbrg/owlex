@@ -32,16 +32,16 @@ Central status hub for research projects. Human-readable, git-versioned, agent-a
 ## Architecture
 
 ```
-research-dashboard (this repo)     <- WHERE things stand
+~/owlex/research/ (this directory)  <- WHERE things stand
        |
        v
-Linear (JON team)                  <- WHAT to do next
+Linear (JON team)                   <- WHAT to do next
        |
        v
-Local CLAUDE.md files              <- HOW to work locally
+Local CLAUDE.md files               <- HOW to work locally
        |
        v
-.owlex/liza-state.yaml             <- In-flight execution state
+.owlex/liza-state.yaml              <- In-flight execution state
 ```
 
 ## Usage
@@ -52,14 +52,14 @@ Local CLAUDE.md files              <- HOW to work locally
 
 ### For Remote Agents
 ```python
-# Clone and read
-git clone https://github.com/jonastbrg/research-dashboard.git /tmp/dashboard
-with open("/tmp/dashboard/PROJECT/STATUS.md") as f:
+# Clone and read (owlex monorepo)
+git clone https://github.com/jonastbrg/owlex.git /tmp/owlex
+with open("/tmp/owlex/research/PROJECT/STATUS.md") as f:
     context = f.read()
 
 # Or via GitHub API (no clone needed)
 import httpx
-url = "https://raw.githubusercontent.com/jonastbrg/research-dashboard/main/PROJECT/STATUS.md"
+url = "https://raw.githubusercontent.com/jonastbrg/owlex/main/research/PROJECT/STATUS.md"
 resp = httpx.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}"})
 context = resp.text
 ```

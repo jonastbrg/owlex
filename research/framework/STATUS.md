@@ -45,7 +45,7 @@ Linear -> Webhook -> Liza -> Council -> PR
 
 ## Context for Agents
 
-**Repository**: `~/owlex-liza-test/framework`
+**Repository**: `~/owlex/framework`
 
 **Key files**:
 - `src/linear_bridge/` - Webhook receiver, status sync
