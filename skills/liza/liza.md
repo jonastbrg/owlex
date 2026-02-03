@@ -155,6 +155,160 @@ State persisted in `.owlex/liza-state.yaml`:
 
 View with: `owlex://liza/blackboard` resource
 
+## Linear Integration
+
+Liza integrates with Linear for issue-driven development. Tasks can originate from Linear issues assigned to AI agents.
+
+### Architecture
+
+```
+Linear Issue → @mention Agent → Webhook
+                                    ↓
+                         ┌──────────────────┐
+                         │  Webhook Server  │ ← Must ACK within 10s
+                         └────────┬─────────┘
+                                  ↓
+                            liza_start
+                                  ↓
+                    ┌─────────────────────────┐
+                    │  Blackboard (.owlex/)   │
+                    └─────────────────────────┘
+                         ↑              ↓
+              ┌──────────┴──┐    ┌──────┴───────┐
+              │   Updater   │    │ Task Claimer │
+              │ (→ Linear)  │    │ (→ Agent)    │
+              └─────────────┘    └──────────────┘
+```
+
+### Assigning Issues to Agents
+
+In Linear, assign issues via @mention to AI agents:
+
+| @mention | Internal Name | CLI | Use For |
+|----------|---------------|-----|---------|
+| `@Claude Coder` | `claude` | `claude --print --dangerously-skip-permissions` | General implementation |
+| `@Gemini Researcher` | `gemini` | `gemini` | Large codebase exploration |
+| `@Codex` | `codex` | `codex --approval-mode full-auto` | Deep code analysis |
+| `@Grok Coder` | `grok` | `opencode` | Alternative perspective |
+
+**Auto-assignment:** Issues are assigned to both Jonathan Steinberg (human, for oversight) and the AI agent.
+
+### Creating Issues via MCP
+
+Use `mcp__plugin_linear_linear__create_issue`:
+- `assignee`: Human reviewer (e.g., "Jonathan Steinberg" or "me")
+- `delegate`: AI agent (e.g., "Claude Coder")
+- `state`: Initial status (e.g., "Backlog", "Todo")
+- `parentId`: Parent issue ID for sub-issues
+
+### Delegation Strategies
+
+**Single agent:** Assign one issue to one agent
+```
+Issue: "Add rate limiting" → @Claude Coder
+```
+
+**Multi-agent collaboration:** Assign one issue to multiple agents
+```
+Issue: "Review security" → @Claude Coder @Gemini Researcher
+```
+
+**Divide and conquer:** Create sub-issues for parallel work
+```
+Parent: "Implement auth system"
+├── Sub-issue: "Design auth flow"       → @Gemini Researcher
+├── Sub-issue: "Implement JWT"          → @Claude Coder
+├── Sub-issue: "Add OAuth providers"    → @Claude Coder
+└── Sub-issue: "Security audit"         → @Codex
+```
+
+### Workflow
+
+1. **Create issue** in Linear (assign to human + AI agent)
+2. **Webhook fires** → AgentSession created
+3. **Webhook ACKs** within 10 seconds (required)
+4. **liza_start** creates task on blackboard
+5. **Task Claimer** claims and dispatches to agent
+6. **Agent implements** the task
+7. **liza_submit** sends to council
+8. **Council reviews** → APPROVE or REJECT
+9. **Updater** syncs status to Linear
+
+### Linear Issue Statuses
+
+Standard workflow states:
+- **Backlog** / **Todo** - Not started
+- **In Progress** - Agent working
+- **In Review** - Council reviewing
+- **Done** - Approved and complete
+- **Canceled** - Superseded or abandoned
+
+### Status Mapping (Liza → Linear)
+
+| Liza Status | Linear Status |
+|-------------|---------------|
+| UNCLAIMED | *(no update)* |
+| WORKING | In Progress |
+| READY_FOR_REVIEW | In Review |
+| IN_REVIEW | In Review |
+| APPROVED | Done |
+| REJECTED | In Progress |
+| MERGED | Done |
+| SUPERSEDED | Canceled |
+
+### Follow-up Messages
+
+@mention the agent in comments to continue the conversation:
+- Triggers `PROMPTED` webhook action
+- Existing session resumed
+- Agent continues based on feedback
+
+## Task Claimer (Automated Dispatch)
+
+The Task Claimer (`framework/src/linear_bridge/task_claimer.py`) polls the blackboard and dispatches tasks.
+
+### Polling Cycle (every 5s)
+
+```
+1. Release tasks from cooldown (if expired)
+2. Skip if agent in cooldown
+3. Get UNCLAIMED tasks
+4. For each: claim → dispatch → monitor
+```
+
+### Dispatch Prompt
+
+```
+You have been assigned Liza task {task_id}.
+Task: {description}
+Instructions:
+1. Implement using appropriate tools
+2. Call liza_submit when done
+3. If rejected, fix and resubmit
+4. Continue until approved
+```
+
+### Error Handling
+
+| Error Type | Detection | Action |
+|------------|-----------|--------|
+| Quota/rate limit | `usage limit`, `rate limit exceeded`, `429` | 1hr cooldown |
+| Timeout | `timed out`, `command timed out` | 5min cooldown |
+| Other failure | Non-zero exit | Unclaim for retry |
+
+### Running the Services
+
+```bash
+# 1. Webhook server
+uvicorn linear_bridge.webhook:app --host 0.0.0.0 --port 8080
+
+# 2. Task Claimer
+task-claimer
+
+# 3. Status Updater
+python -m linear_bridge.updater -d /path/to/project
+```
+
 ## Configuration
 
 Default reviewers: `["codex", "gemini"]`
