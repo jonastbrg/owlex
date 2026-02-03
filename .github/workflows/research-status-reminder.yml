@@ -1,14 +1,17 @@
-name: Daily Status Reminder
+name: Research Status Reminder
 
 on:
   schedule:
-    # 9 AM UTC daily (adjust timezone as needed)
+    # 9 AM UTC daily
     - cron: '0 9 * * *'
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
   check-staleness:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./research
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,7 +20,7 @@ jobs:
       - name: Check last update times
         id: check
         run: |
-          echo "## Dashboard Staleness Check" >> $GITHUB_STEP_SUMMARY
+          echo "## Research Dashboard Staleness Check" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           for status_file in */STATUS.md; do
@@ -48,7 +51,7 @@ jobs:
             });
 
             // Don't create duplicate reminder issues
-            const hasOpenReminder = issues.some(i => i.title.includes('Dashboard Update'));
+            const hasOpenReminder = issues.some(i => i.title.includes('Research Status'));
             if (hasOpenReminder) {
               console.log('Reminder issue already exists');
               return;
@@ -57,7 +60,7 @@ jobs:
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'Dashboard Update Reminder',
-              body: 'One or more STATUS.md files have not been updated in over 7 days.\n\nPlease review and update project statuses.',
-              labels: ['reminder']
+              title: 'Research Status Update Reminder',
+              body: 'One or more research STATUS.md files have not been updated in over 7 days.\n\nPlease review and update project statuses in the `research/` directory.',
+              labels: ['reminder', 'research']
             });
