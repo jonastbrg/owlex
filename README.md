@@ -4,15 +4,15 @@ Central status hub for research projects. Human-readable, git-versioned, agent-a
 
 ## Active Projects
 
-| Project | Status | Current Focus | Priority |
-|---------|--------|---------------|----------|
-| [embodied-safety](./embodied-safety/STATUS.md) | Active | VLA adversarial evaluation | P0 |
-| [attacker-as-defender](./attacker-as-defender/STATUS.md) | Active | Stage 1 dataset collection | P1 |
-| [framework](./framework/STATUS.md) | Maintenance | Linear integration stable | P2 |
+| Project | Status | Progress | Current Focus | Priority |
+|---------|--------|----------|---------------|----------|
+| [lightwheel-integration](./lightwheel-integration/STATUS.md) | Planning Complete | 0% | Ready for Phase 0 implementation | P0 |
+| [attacker-as-defender](./attacker-as-defender/STATUS.md) | Active | - | Stage 1 dataset collection | P1 |
+| [framework](./framework/STATUS.md) | Maintenance | - | Linear integration stable | P2 |
 
 ## This Week's Priorities
 
-1. **Embodied Safety**: Continue VLA evaluation experiments
+1. **Lightwheel Integration**: Begin Phase 0 - DB schema, GCP infra, Temporal setup
 2. **Attacker-as-Defender**: Build Stage 1 curriculum datasets
 3. **Framework**: Bug fixes only (no new features)
 
@@ -65,4 +65,4 @@ context = resp.text
 
 ---
 
-*Last portfolio review: 2025-02-02*
+*Last portfolio review: 2026-02-03*
