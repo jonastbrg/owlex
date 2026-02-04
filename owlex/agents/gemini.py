@@ -117,10 +117,16 @@ class GeminiRunner(AgentRunner):
         prompt: str,
         working_directory: str | None = None,
         enable_search: bool = False,  # Gemini doesn't have search flag
+        model: str | None = None,  # Model override (for fallback retries)
         **kwargs,
     ) -> AgentCommand:
         """Build command for starting a new Gemini session."""
         full_command = ["gemini"]
+
+        # Model selection (override > config > CLI default)
+        effective_model = model or config.gemini.model
+        if effective_model:
+            full_command.extend(["--model", effective_model])
 
         # Approval mode handling (in order of precedence):
         # 1. allowed_tools - most targeted (safest)
@@ -156,10 +162,16 @@ class GeminiRunner(AgentRunner):
         prompt: str,
         working_directory: str | None = None,
         enable_search: bool = False,
+        model: str | None = None,  # Model override (for fallback retries)
         **kwargs,
     ) -> AgentCommand:
         """Build command for resuming an existing Gemini session."""
         full_command = ["gemini"]
+
+        # Model selection (override > config > CLI default)
+        effective_model = model or config.gemini.model
+        if effective_model:
+            full_command.extend(["--model", effective_model])
 
         # Same approval mode handling as build_exec_command
         if config.gemini.allowed_tools:

@@ -23,6 +23,8 @@ class GeminiConfig:
     approval_mode: str | None = None  # "auto_edit" or "yolo" - safer than yolo_mode
     allowed_tools: list[str] | None = None  # Specific tools to allow (safest)
     clean_output: bool = True
+    model: str = "gemini-3-flash-preview"  # Primary model (fast)
+    fallback_model: str = "gemini-3-pro-preview"  # Fallback when primary is rate-limited
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,8 @@ def load_config() -> OwlexConfig:
         approval_mode=os.environ.get("GEMINI_APPROVAL_MODE") or None,  # "auto_edit" or "yolo"
         allowed_tools=gemini_allowed_tools,  # e.g., "write_file,edit_file,read_file"
         clean_output=os.environ.get("GEMINI_CLEAN_OUTPUT", "true").lower() == "true",
+        model=os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"),  # Primary: fast
+        fallback_model=os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3-pro-preview"),  # Fallback: when rate-limited
     )
 
     opencode = OpenCodeConfig(

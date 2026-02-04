@@ -15,7 +15,7 @@ from pydantic import Field
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.session import ServerSession
 
-from .models import TaskResponse, ErrorCode, Agent
+from .models import TaskResponse, ErrorCode, Agent, Task
 from .engine import engine, DEFAULT_TIMEOUT, codex_runner, gemini_runner, opencode_runner, claudeor_runner, grok_runner
 from .council import Council
 from .config import config
@@ -58,9 +58,8 @@ def _get_codex_model() -> str:
 
 
 def _get_gemini_model() -> str:
-    """Get Gemini model - uses CLI default."""
-    # Gemini CLI uses default model based on version
-    return "gemini-2.5-pro"  # Default for current CLI
+    """Get Gemini model from config."""
+    return config.gemini.model
 
 
 def _get_opencode_model() -> str:
@@ -100,7 +99,8 @@ async def get_agents() -> str:
         "gemini": {
             "available": "gemini" not in excluded,
             "cli_version": gemini_ver,
-            "model": _get_gemini_model(),
+            "model": config.gemini.model,
+            "fallback_model": config.gemini.fallback_model,
             "description": "1M context window, multimodal, large codebases",
             "config": {
                 "yolo_mode": config.gemini.yolo_mode,
@@ -266,6 +266,69 @@ async def resume_codex_session(
 
 # === Gemini Tools ===
 
+def _is_rate_limit_error(error: str | None) -> bool:
+    """Check if an error indicates rate limiting."""
+    if not error:
+        return False
+    error_lower = error.lower()
+    rate_limit_indicators = [
+        "429",
+        "rate limit",
+        "rate_limit",
+        "ratelimit",
+        "quota exceeded",
+        "quota_exceeded",
+        "resource exhausted",
+        "resource_exhausted",
+        "too many requests",
+    ]
+    return any(indicator in error_lower for indicator in rate_limit_indicators)
+
+
+async def _run_gemini_with_fallback(
+    task: Task,
+    mode: str,
+    prompt: str,
+    working_directory: str | None,
+    session_ref: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Run Gemini agent with automatic fallback to secondary model on rate limit.
+
+    Returns (used_fallback, fallback_model) tuple.
+    """
+    # Try primary model first
+    await engine.run_agent(
+        task, gemini_runner, mode=mode,
+        prompt=prompt, working_directory=working_directory,
+        session_ref=session_ref,
+    )
+
+    # Check if we should fallback
+    if task.status == "failed" and _is_rate_limit_error(task.error):
+        fallback_model = config.gemini.fallback_model
+        if fallback_model:
+            _log(f"Rate limit detected, falling back to {fallback_model}")
+
+            # Reset task state for retry
+            task.status = "pending"
+            task.error = None
+            task.result = None
+            task.warnings = None
+            task.completion_time = None
+
+            # Retry with fallback model
+            await engine.run_agent(
+                task, gemini_runner, mode=mode,
+                prompt=prompt, working_directory=working_directory,
+                session_ref=session_ref,
+                model=fallback_model,  # Override to fallback model
+            )
+            return (True, fallback_model)
+
+    return (False, None)
+
+
 @mcp.tool()
 async def start_gemini_session(
     ctx: Context[ServerSession, None],
@@ -286,16 +349,22 @@ async def start_gemini_session(
         context=ctx,
     )
 
-    task.async_task = asyncio.create_task(engine.run_agent(
-        task, gemini_runner, mode="exec",
-        prompt=prompt.strip(), working_directory=working_directory
-    ))
+    async def run_with_fallback():
+        used_fallback, fallback_model = await _run_gemini_with_fallback(
+            task, mode="exec",
+            prompt=prompt.strip(), working_directory=working_directory,
+        )
+        if used_fallback:
+            task.args["used_fallback"] = True
+            task.args["fallback_model"] = fallback_model
+
+    task.async_task = asyncio.create_task(run_with_fallback())
 
     return TaskResponse(
         success=True,
         task_id=task.task_id,
         status=task.status,
-        message="Gemini session started. Use wait_for_task to get result.",
+        message=f"Gemini session started ({config.gemini.model}, fallback: {config.gemini.fallback_model}). Use wait_for_task to get result.",
     ).model_dump()
 
 
@@ -328,16 +397,23 @@ async def resume_gemini_session(
         context=ctx,
     )
 
-    task.async_task = asyncio.create_task(engine.run_agent(
-        task, gemini_runner, mode="resume",
-        prompt=prompt.strip(), session_ref=session_ref, working_directory=working_directory
-    ))
+    async def run_with_fallback():
+        used_fallback, fallback_model = await _run_gemini_with_fallback(
+            task, mode="resume",
+            prompt=prompt.strip(), working_directory=working_directory,
+            session_ref=session_ref,
+        )
+        if used_fallback:
+            task.args["used_fallback"] = True
+            task.args["fallback_model"] = fallback_model
+
+    task.async_task = asyncio.create_task(run_with_fallback())
 
     return TaskResponse(
         success=True,
         task_id=task.task_id,
         status=task.status,
-        message=f"Gemini resume started (session: {session_ref}). Use wait_for_task to get result.",
+        message=f"Gemini resume started ({config.gemini.model}, fallback: {config.gemini.fallback_model}, session: {session_ref}). Use wait_for_task to get result.",
     ).model_dump()
 
 
